@@ -39,6 +39,7 @@ jobs:
           node-version: '20'
       - run: npm install --ignore-scripts
       - run: npm test
+      - run: node --test ../loadtest/commerce.test.mjs
 
   website-build:
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'loadtest-')

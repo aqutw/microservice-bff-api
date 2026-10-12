@@ -102,7 +102,7 @@ cd bff-api && npm test
 - Desktop checkout：5 VUs，每個 3 次，包含付款確認與 inventory commit。
 - App checkout：3 VUs，每個 2 次，包含 App payment contract 與 inventory commit。
 
-門檻為 checks 成功率大於 95%、HTTP failure rate 小於 5%、catalog p95 小於 500ms、audit p95 小於 750ms、兩種 checkout p95 小於 1500ms。Checkout 使用 fresh volumes 與有限 iterations，避免 PoC 的有限 seed inventory 把壓測誤判成大量 `insufficient_stock`。CI 會保存 k6 summary、k6 log、Compose logs 與 service 狀態七天，完成後清理 containers／volumes。
+門檻包含各 checkout scenario 的 checks 全數成功與零 HTTP failure、Desktop／App 完整交易成功率 100% 與固定嘗試數（15／6）；讀取 scenario 的 checks 成功率大於 95%。全域 HTTP failure rate 小於 5%，catalog p95 小於 500ms、audit p95 小於 750ms、兩種 checkout p95 小於 1500ms。Checkout 使用 fresh volumes 與有限 iterations，避免 PoC 的有限 seed inventory 把壓測誤判成大量 `insufficient_stock`。CI 會保存 k6 summary、k6 log、Compose logs 與 service 狀態七天，完成後清理 containers／volumes。
 
 本地執行需要 Docker daemon 可用：
 
