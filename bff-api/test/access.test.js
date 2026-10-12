@@ -1,10 +1,11 @@
+import '../fixtures/service-fixture.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createServer } from '../src/server.js';
 
 async function invoke(path, method, identity) {
   let status, body;
-  await createServer('app', { order: 'http://order', payment: 'http://payment', audit: 'http://audit' }, { authenticate: async () => identity })(
+  await createServer('app', { order: 'https://order', payment: 'https://payment', audit: 'https://audit' }, { authenticate: async () => identity })(
     { url: path, method, headers: { 'x-actor-id': 'victim' } }, { writeHead(value) { status = value; }, end(value) { body = JSON.parse(value); } });
   return { status, body };
 }

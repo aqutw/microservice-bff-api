@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"poc/security"
 	"strconv"
 	"strings"
 )
@@ -28,18 +29,29 @@ type auditEvent struct {
 }
 
 var db *sql.DB
+var serviceAuth *security.Auth
 
 func main() {
+	var authErr error
+	serviceAuth, authErr = security.Load("audit-worker")
+	if authErr != nil {
+		log.Fatal(authErr)
+	}
 	path := env("DB_PATH", "./data/audit.db")
 	if dir := strings.TrimSuffix(path, "/"+base(path)); dir != "" && dir != path {
 		_ = os.MkdirAll(dir, 0755)
 	}
 	var err error
-	db, err = sql.Open("sqlite", path)
+	db, err = sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		log.Fatal(err)
 	}
+	// This receiver has no nested outbox queries; serialize SQLite access.
+	db.SetMaxOpenConns(1)
 	if err = initDB(); err != nil {
+		log.Fatal(err)
+	}
+	if err = serviceAuth.UseReplayStore(db); err != nil {
 		log.Fatal(err)
 	}
 	mux := http.NewServeMux()
@@ -47,7 +59,7 @@ func main() {
 	mux.HandleFunc("/v1/audit/events", events)
 	addr := ":" + env("PORT", "8084")
 	log.Printf("audit worker listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, logging(mux)))
+	log.Fatal(serviceAuth.Listen(addr, logging(mux)))
 }
 
 func env(k, fallback string) string {
@@ -81,6 +93,10 @@ func events(w http.ResponseWriter, r *http.Request) {
 		var event auditEvent
 		if err := json.NewDecoder(r.Body).Decode(&event); err != nil || event.EventID == "" || event.EventType == "" || event.Service == "" || event.AggregateID == "" || event.OccurredAt == "" {
 			writeJSON(w, 400, map[string]string{"error": "invalid_audit_event"})
+			return
+		}
+		if caller := security.Caller(r); caller != "" && event.Service != caller {
+			writeJSON(w, 403, map[string]string{"error": "audit_publisher_mismatch"})
 			return
 		}
 		before, _ := json.Marshal(event.Before)

@@ -1,0 +1,29 @@
+# Explicit local/CI override; do not use in production.
+services:
+  identity:
+    image: quay.io/keycloak/keycloak:26.8.0
+    command: [start-dev, --import-realm]
+    environment:
+      KC_HOSTNAME: http://localhost:${IDENTITY_PORT:-9091}
+      KC_HTTP_ENABLED: "true"
+    ports: ["127.0.0.1:${IDENTITY_PORT:-9091}:8080"]
+    volumes: ["./.security/realm.json:/opt/keycloak/data/import/commerce.json:ro"]
+  desktop-bff:
+    environment: &local-auth
+      DEPLOYMENT_ENV: development
+      AUTH_ALLOW_HTTP: "true"
+      AUTH_JWKS_URL: http://identity:8080/realms/commerce/protocol/openid-connect/certs
+  app-bff:
+    environment: *local-auth
+  website:
+    environment:
+      <<: *local-auth
+      OIDC_INTERNAL_ORIGIN: http://identity:8080
+  order:
+    ports: ["127.0.0.1:${ORDER_PORT:-8081}:8081"]
+  inventory:
+    ports: ["127.0.0.1:${INVENTORY_PORT:-8082}:8082"]
+  payment:
+    ports: ["127.0.0.1:${PAYMENT_PORT:-8083}:8083"]
+  audit-worker:
+    ports: ["127.0.0.1:${AUDIT_PORT:-8084}:8084"]

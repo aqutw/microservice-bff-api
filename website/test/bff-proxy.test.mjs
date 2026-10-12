@@ -1,12 +1,19 @@
-import { EncryptJWT } from 'jose';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after } from 'node:test';
+import { createStoredSession, revokeSession } from '../lib/auth.mjs';
+const sessionDirectory = mkdtempSync(join(tmpdir(),'commerce-session-test-'));
+after(() => rmSync(sessionDirectory,{recursive:true,force:true}));
 import assert from 'node:assert/strict';
 import test, { afterEach } from 'node:test';
+import { authSettings } from '../lib/auth.mjs';
 import { proxyRequest } from '../lib/bff-proxy.mjs';
 
 const key = Buffer.alloc(32, 7);
-Object.assign(process.env, { DEPLOYMENT_ENV: 'development', AUTH_ALLOW_HTTP: 'true', AUTH_ISSUER: 'http://identity', AUTH_JWKS_URL: 'http://identity/keys', AUTH_AUDIENCE: 'api', PUBLIC_URL: 'http://website', OIDC_CLIENT_ID: 'website', OIDC_CLIENT_SECRET: 'test-only', SESSION_SECRET: key.toString('base64url') });
+Object.assign(process.env, { SESSION_STORE_DIR: sessionDirectory, DEPLOYMENT_ENV: 'development', AUTH_ALLOW_HTTP: 'true', AUTH_ISSUER: 'http://identity', AUTH_JWKS_URL: 'http://identity/keys', AUTH_AUDIENCE: 'api', PUBLIC_URL: 'http://website', OIDC_CLIENT_ID: 'website', OIDC_CLIENT_SECRET: 'test-only', SESSION_SECRET: key.toString('base64url') });
 async function sessionHeaders() {
- const value = await new EncryptJWT({ accessToken: 'trusted-access-token', csrf: 'csrf-secret' }).setProtectedHeader({ alg: 'dir', enc: 'A256GCM' }).setIssuer('http://website').setAudience('session').setExpirationTime('5m').encrypt(key);
+ const value = await createStoredSession({accessToken:'trusted-access-token',csrf:'csrf-secret'}, authSettings(), 300);
  return { cookie: `commerce_session=${value}`, origin: 'http://website', 'x-csrf-token': 'csrf-secret' };
 }
 
@@ -21,11 +28,11 @@ afterEach(() => {
 test('the same module reads different BFF origins at request time', async () => {
   const destinations = [];
   globalThis.fetch = async url => { destinations.push(String(url)); return Response.json({products: []}); };
-  for (const base of ['http://desktop-bff:3001', 'http://other-bff:5001']) {
+  for (const base of ['https://desktop-bff:3001', 'https://other-bff:5001']) {
     process.env.BFF_URL = base;
     await proxyRequest(new Request('http://website/api/audit/events?service=payment', { headers: await sessionHeaders() }), ['audit','events']);
   }
-  assert.deepEqual(destinations, ['http://desktop-bff:3001/api/audit/events?service=payment','http://other-bff:5001/api/audit/events?service=payment']);
+  assert.deepEqual(destinations, ['https://desktop-bff:3001/api/audit/events?service=payment','https://other-bff:5001/api/audit/events?service=payment']);
 });
 
 test('proxy preserves checkout body, idempotency key and upstream error status', async () => {
@@ -49,4 +56,10 @@ test('anonymous, foreign-origin and missing CSRF mutations never reach BFF', asy
    const request = new Request('http://website/api/checkout', {method:'POST',headers:{...headers,...change},body:'{}'});
    assert.equal((await proxyRequest(request,['checkout'])).status,403);
  }
+});
+
+test('plaintext upstream configuration cannot receive a session bearer token',async()=>{
+ process.env.BFF_URL='http://unsafe-bff';globalThis.fetch=async()=>assert.fail('bearer token sent without TLS');
+ const result=await proxyRequest(new Request('http://website/api/orders/order',{headers:await sessionHeaders()}),['orders','order']);
+ assert.equal(result.status,503);assert.equal((await result.json()).error,'bff_https_required');
 });

@@ -1,4 +1,6 @@
 import http from 'k6/http';
+import crypto from 'k6/crypto';
+import encoding from 'k6/encoding';
 import { check, sleep } from 'k6';
 import { Counter, Rate } from 'k6/metrics';
 
@@ -7,9 +9,9 @@ const appCompleted = new Rate('app_transactions_completed');
 const desktopAttempted = new Counter('desktop_transactions_attempted');
 const appAttempted = new Counter('app_transactions_attempted');
 
-const desktop = __ENV.DESKTOP_BFF_URL || 'http://127.0.0.1:3001';
-const app = __ENV.APP_BFF_URL || 'http://127.0.0.1:3002';
-const inventory = __ENV.INVENTORY_API_URL || 'http://127.0.0.1:8082';
+const desktop = __ENV.DESKTOP_BFF_URL || 'https://127.0.0.1:3001';
+const app = __ENV.APP_BFF_URL || 'https://127.0.0.1:3002';
+const inventory = __ENV.INVENTORY_API_URL || 'https://127.0.0.1:8082';
 
 export const options = {
   scenarios: {
@@ -69,7 +71,7 @@ export const options = {
   }
 };
 
-const jsonHeaders = { headers: { 'Content-Type': 'application/json', 'X-Actor-ID': 'loadtest', 'X-Correlation-ID': '' } };
+const jsonHeaders = { headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${__ENV.ACCESS_TOKEN || ''}`, 'X-Correlation-ID': '' } };
 
 function body(response) {
   try { return response.json(); } catch (_) { return {}; }
@@ -85,12 +87,17 @@ export function catalogRead() {
 }
 
 export function auditRead() {
-  const response = http.get(`${desktop}/api/audit/events?limit=20`);
+  const response = http.get(`${desktop}/api/audit/events?limit=20`, jsonHeaders);
   check(response, { 'audit returns 200': r => r.status === 200, 'audit has events array': r => Array.isArray(body(r).events) });
 }
 
 function commitReservation(reservationID, id) {
-  const response = http.post(`${inventory}/v1/reservations/${reservationID}/commit`, null, { headers: { 'X-Actor-ID': 'loadtest', 'X-Correlation-ID': id } });
+  const path = `/v1/reservations/${reservationID}/commit`;
+  const stamp = String(Math.floor(Date.now() / 1000));
+  const nonce = Array.from(new Uint8Array(crypto.randomBytes(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+  const canonical = ['POST', path, crypto.sha256('', 'hex'), 'order', 'inventory', stamp, nonce, '', id, '', ''].join('\n');
+  const signature = crypto.hmac('sha256', encoding.b64decode(__ENV.INVENTORY_SERVICE_KEY || '', 'rawurl'), canonical, 'hex');
+  const response = http.post(`${inventory}${path}`, '', { headers: { 'X-Correlation-ID': id, 'X-Service-ID': 'order', 'X-Service-Time': stamp, 'X-Service-Nonce': nonce, 'X-Service-Signature': signature } });
   return check(response, { 'inventory commit returns 200': r => r.status === 200 && body(r).status === 'committed' });
 }
 
@@ -100,7 +107,7 @@ function resolveCheckout(response, base) {
   if (!checkoutId) return response;
   for (let attempt = 0; attempt < 30; attempt++) {
     sleep(0.1);
-    response = http.get(`${base}/api/checkouts/${encodeURIComponent(checkoutId)}`);
+    response = http.get(`${base}/api/checkouts/${encodeURIComponent(checkoutId)}`, jsonHeaders);
     if (response.status !== 202) return response;
   }
   return response;

@@ -24,9 +24,16 @@ jobs:
       run:
         shell: bash
     env:
+      COMPOSE_FILE: docker-compose.yml:docker-compose.dev.yml
+      COMPOSE_ENV_FILES: .env.security
       COMPOSE_PROJECT_NAME: poc-loadtest-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Generate isolated local identity credentials
+        run: node scripts/init-security.mjs
       - name: Build and start services
         run: |
           mkdir -p artifacts/loadtest
@@ -37,7 +44,7 @@ jobs:
           wait_http() {
             local url=$1 max_time=${2:-3}
             for attempt in {1..60}; do
-              if curl --fail --silent --show-error --max-time "$max_time" "$url" >/dev/null; then
+              if curl --cacert .security/pki/ca.pem --fail --silent --show-error --max-time "$max_time" "$url" >/dev/null; then
                 echo "Ready: $url"
                 return 0
               fi
@@ -47,12 +54,15 @@ jobs:
             return 1
           }
           for port in 8081 8082 8083 8084 3001 3002; do
-            wait_http "http://127.0.0.1:${port}/healthz"
+            wait_http "https://127.0.0.1:${port}/healthz"
           done
           wait_http http://127.0.0.1:3000/audit 10
+      - name: Prepare authenticated test tokens
+        run: node scripts/test-tokens.mjs
       - name: Run k6 scenarios
         run: |
-          docker run --rm --network host \
+          docker run --rm --network host --env-file .security/tokens.env --env SSL_CERT_FILE=/certs/ca.pem \
+            --volume "$PWD/.security/pki/ca.pem:/certs/ca.pem:ro" \
             --volume "$PWD/loadtest:/scripts:ro" \
             --volume "$PWD/artifacts/loadtest:/results" \
             grafana/k6:0.54.0 run \

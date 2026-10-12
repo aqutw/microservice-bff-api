@@ -33,7 +33,7 @@ export function createAuthenticator(config = identityConfig(), keySet) {
       const roles = Array.isArray(payload.realm_access?.roles) ? payload.realm_access.roles : [];
       return { id, subject: payload.sub, scopes, auditRead: scopes.includes('audit:read') || roles.includes('audit-reader') };
     } catch (error) {
-      if (error.code === 'ERR_JWKS_TIMEOUT' || error instanceof TypeError) throw apiError('identity_unavailable', 503);
+      if (['ERR_JWKS_TIMEOUT', 'ERR_JOSE_GENERIC', 'ERR_JWKS_INVALID'].includes(error.code) || error instanceof TypeError) throw apiError('identity_unavailable', 503);
       throw apiError('unauthorized', 401, false);
     }
   };

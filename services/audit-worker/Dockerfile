@@ -1,8 +1,9 @@
 FROM golang:1.27.2 AS build
-WORKDIR /src
-COPY go.mod go.sum ./
+WORKDIR /src/audit-worker
+COPY audit-worker/go.mod audit-worker/go.sum ./
+COPY security ../security
 RUN go mod download
-COPY main.go ./
+COPY audit-worker/*.go ./
 RUN CGO_ENABLED=0 go build -trimpath -o /out/audit-worker .
 FROM gcr.io/distroless/static-debian12
 WORKDIR /app

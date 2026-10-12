@@ -1,3 +1,4 @@
+import '../fixtures/service-fixture.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { generateKeyPair, exportJWK, createLocalJWKSet, SignJWT } from 'jose';
@@ -49,6 +50,6 @@ test('checkout ignores a forged owner in the request body', async () => {
       assert.equal(JSON.parse(options.body).user_id, 'trusted-user');
       return Response.json({ checkout_id: 'c', state: 'processing' });
     };
-    await checkout({ user_id: 'victim', items: [{ sku: 'mug', quantity: 1 }] }, 'app', { order: 'http://order' }, { 'x-actor-id': 'trusted-user' });
+    await checkout({ user_id: 'victim', items: [{ sku: 'mug', quantity: 1 }] }, 'app', { order: 'https://order' }, { 'x-actor-id': 'trusted-user' });
   } finally { globalThis.fetch = original; }
 });

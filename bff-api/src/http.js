@@ -1,3 +1,4 @@
+import { signInternalRequest } from './service-auth.js';
 export function apiError(message, status, retryable = status >= 500) {
   return Object.assign(new Error(message), { status, retryable });
 }
@@ -7,14 +8,19 @@ export async function request(base, path, options = {}, timeoutMs = Number(proce
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${base}${path}`, {
-      ...options, signal: controller.signal,
-      headers: { 'content-type': 'application/json', ...(options.headers || {}) }
+    const { service, ...fetchOptions } = options;
+    if (service && new URL(base).protocol !== 'https:') throw apiError('service_https_required', 500);
+    const target = new URL(`${base}${path}`);
+    const serviceHeaders = service ? signInternalRequest(service, target.pathname + target.search, options) : {};
+    const response = await fetch(target.href, {
+      ...fetchOptions, redirect: 'error', signal: controller.signal,
+      headers: { 'content-type': 'application/json', ...(options.headers || {}), ...serviceHeaders }
     });
     const text = await response.text();
     let body;
     try { body = text ? JSON.parse(text) : {}; }
     catch { throw apiError('invalid_upstream_response', 502); }
+    if (service && [401, 403].includes(response.status)) throw apiError('upstream_auth_unavailable', 503);
     if (!response.ok) throw Object.assign(apiError(body.error || `upstream_${response.status}`, response.status), { body });
     return body;
   } catch (error) {

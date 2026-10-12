@@ -1,8 +1,9 @@
 FROM golang:1.27.2 AS build
-WORKDIR /src
-COPY go.mod go.sum ./
+WORKDIR /src/payment
+COPY payment/go.mod payment/go.sum ./
+COPY security ../security
 RUN go mod download
-COPY *.go ./
+COPY payment/*.go ./
 RUN CGO_ENABLED=0 go build -trimpath -o /out/payment .
 FROM gcr.io/distroless/static-debian12
 WORKDIR /app

@@ -213,7 +213,11 @@ func callCheckout(job checkoutJob, base, path string, payload any) (json.RawMess
 	req.Header.Set("Idempotency-Key", job.ID+":"+job.Stage)
 	req.Header.Set("X-Actor-ID", job.Actor)
 	req.Header.Set("X-Correlation-ID", job.Correlation)
-	response, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	target := "inventory"
+	if base == env("PAYMENT_API_URL", "https://localhost:8083") {
+		target = "payment"
+	}
+	response, err := serviceAuth.Do(&http.Client{Timeout: 3 * time.Second}, target, req)
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +262,7 @@ func processCheckout(id string) {
 	for step := 0; step < 3; step++ {
 		switch job.Stage {
 		case "reserve":
-			job.Result.Inventory, err = callCheckout(job, env("INVENTORY_API_URL", "http://localhost:8082"), "/v1/reservations", map[string]any{"order_id": job.Result.Order.ID, "items": job.Input.Items})
+			job.Result.Inventory, err = callCheckout(job, env("INVENTORY_API_URL", "https://localhost:8082"), "/v1/reservations", map[string]any{"order_id": job.Result.Order.ID, "items": job.Input.Items})
 			if err == nil {
 				var reservation struct {
 					ID string `json:"reservation_id"`
@@ -272,7 +276,7 @@ func processCheckout(id string) {
 				err = checkpoint(&job, "payment")
 			}
 		case "payment":
-			job.Result.Payment, err = callCheckout(job, env("PAYMENT_API_URL", "http://localhost:8083"), "/v1/payments", map[string]any{"order_id": job.Result.Order.ID, "amount_cents": job.Input.TotalCents, "currency": job.Input.Currency, "channel": job.Input.Channel})
+			job.Result.Payment, err = callCheckout(job, env("PAYMENT_API_URL", "https://localhost:8083"), "/v1/payments", map[string]any{"order_id": job.Result.Order.ID, "amount_cents": job.Input.TotalCents, "currency": job.Input.Currency, "channel": job.Input.Channel})
 			if err == nil {
 				var payment struct {
 					ID string `json:"id"`
@@ -301,7 +305,7 @@ func processCheckout(id string) {
 		}
 		if err != nil {
 			var failure upstreamFailure
-			if job.Stage != "compensate" && job.Stage != "awaiting_payment" && errors.As(err, &failure) && failure.status >= 400 && failure.status < 500 {
+			if job.Stage != "compensate" && job.Stage != "awaiting_payment" && errors.As(err, &failure) && (failure.status == 400 || failure.status == 409 || failure.status == 422) {
 				job.ErrorStatus = failure.status
 				job.ErrorMessage = failure.message
 				// An explicit rejection has no committed side effect. Unknown outcomes
@@ -325,14 +329,15 @@ func compensateCheckout(job *checkoutJob) error {
 		if err := json.Unmarshal(job.Result.Inventory, &reservation); err != nil {
 			return err
 		}
-		_, err := callCheckout(*job, env("INVENTORY_API_URL", "http://localhost:8082"), "/v1/reservations/"+reservation.ID+"/release", nil)
+		_, err := callCheckout(*job, env("INVENTORY_API_URL", "https://localhost:8082"), "/v1/reservations/"+reservation.ID+"/release", nil)
 		if err != nil {
 			var failure upstreamFailure
 			if !errors.As(err, &failure) || failure.status != 409 {
 				return err
 			}
 			// A prior successful release can lose its response; verify it was released.
-			response, getErr := (&http.Client{Timeout: 3 * time.Second}).Get(env("INVENTORY_API_URL", "http://localhost:8082") + "/v1/reservations/" + reservation.ID)
+			lookup, _ := http.NewRequest(http.MethodGet, env("INVENTORY_API_URL", "https://localhost:8082")+"/v1/reservations/"+reservation.ID, nil)
+			response, getErr := serviceAuth.Do(&http.Client{Timeout: 3 * time.Second}, "inventory", lookup)
 			if getErr != nil {
 				return getErr
 			}
@@ -412,7 +417,8 @@ func reconcilePayment(job *checkoutJob) error {
 	if err := json.Unmarshal(job.Result.Payment, &reference); err != nil {
 		return err
 	}
-	response, err := (&http.Client{Timeout: 3 * time.Second}).Get(env("PAYMENT_API_URL", "http://localhost:8083") + "/v1/payments/" + reference.ID)
+	lookup, _ := http.NewRequest(http.MethodGet, env("PAYMENT_API_URL", "https://localhost:8083")+"/v1/payments/"+reference.ID, nil)
+	response, err := serviceAuth.Do(&http.Client{Timeout: 3 * time.Second}, "payment", lookup)
 	if err != nil {
 		return err
 	}

@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
+import { serviceConfig } from './service-auth.js';
 import { createAuthenticator } from './auth.js';
 import { apiError, readBody, request } from './http.js';
 
 const defaults = {
-  order: process.env.ORDER_API_URL || 'http://localhost:8081',
-  inventory: process.env.INVENTORY_API_URL || 'http://localhost:8082',
-  payment: process.env.PAYMENT_API_URL || 'http://localhost:8083',
-  audit: process.env.AUDIT_API_URL || 'http://localhost:8084'
+  order: process.env.ORDER_API_URL || 'https://localhost:8081',
+  inventory: process.env.INVENTORY_API_URL || 'https://localhost:8082',
+  payment: process.env.PAYMENT_API_URL || 'https://localhost:8083',
+  audit: process.env.AUDIT_API_URL || 'https://localhost:8084'
 };
 
 const catalog = [
@@ -35,7 +36,7 @@ export async function checkout(input, variant, services = defaults, context = {}
   const key = context['idempotency-key'] || randomUUID();
   if (typeof key !== 'string' || key.length > 200) throw apiError('invalid_idempotency_key', 400);
   const result = await request(services.order, '/v1/checkouts', {
-    method: 'POST', headers: { ...context, 'idempotency-key': key },
+    service: 'order', method: 'POST', headers: { ...context, 'idempotency-key': key },
     body: JSON.stringify({ user_id: userId, items: normalized.map(({ sku, quantity }) => ({ sku, quantity })), total_cents: totalCents, currency: 'TWD', channel })
   });
   return formatCheckout(result, variant, normalized);
@@ -52,6 +53,10 @@ function formatCheckout(result, variant, normalized) {
 
 export function createServer(variant, services = defaults, security = {}) {
   const authenticate = security.authenticate || createAuthenticator();
+  if (!security.authenticate) {
+    const config = serviceConfig();
+    if (config.name !== `${variant}-bff`) throw new Error('SERVICE_NAME does not match BFF variant');
+  }
   const allowedOrigins = new Set((process.env.ALLOWED_ORIGINS || process.env.PUBLIC_URL || '').split(',').filter(Boolean));
   return async (req, res) => {
     const context = { 'x-correlation-id': typeof req.headers['x-correlation-id'] === 'string' && req.headers['x-correlation-id'].length <= 128 ? req.headers['x-correlation-id'] : randomUUID() };
@@ -76,23 +81,23 @@ export function createServer(variant, services = defaults, security = {}) {
       }
       const checkoutMatch = path.match(/^\/api\/checkouts\/([^/]+)$/);
       if (req.method === 'GET' && checkoutMatch) {
-        const result = await request(services.order, `/v1/checkouts/${encodeURIComponent(checkoutMatch[1])}`, { headers: context });
+        const result = await request(services.order, `/v1/checkouts/${encodeURIComponent(checkoutMatch[1])}`, { headers: context, service: 'order' });
         requireOwner(result.order?.user_id, identity);
         return json(res, result.state === 'processing' ? 202 : 200, formatCheckout(result, variant));
       }
       const orderMatch = path.match(/^\/api\/orders\/([^/]+)$/);
       if (req.method === 'GET' && orderMatch) {
-        const order = await request(services.order, `/v1/orders/${encodeURIComponent(orderMatch[1])}`, { headers: context });
+        const order = await request(services.order, `/v1/orders/${encodeURIComponent(orderMatch[1])}`, { headers: context, service: 'order' });
         requireOwner(order.user_id, identity);
         return json(res, 200, order);
       }
       const paymentMatch = path.match(/^\/api\/payments\/([^/]+)\/confirm$/);
       if (req.method === 'POST' && paymentMatch) {
-        const reference = await request(services.payment, `/v1/payments/${encodeURIComponent(paymentMatch[1])}`, { headers: context });
-        const order = await request(services.order, `/v1/orders/${encodeURIComponent(reference.order_id)}`, { headers: context });
+        const reference = await request(services.payment, `/v1/payments/${encodeURIComponent(paymentMatch[1])}`, { headers: context, service: 'payment' });
+        const order = await request(services.order, `/v1/orders/${encodeURIComponent(reference.order_id)}`, { headers: context, service: 'order' });
         requireOwner(order.user_id, identity);
-        const payment = await request(services.payment, `/v1/payments/${encodeURIComponent(paymentMatch[1])}/confirm`, { method: 'POST', headers: context, body: '{}' });
-        await request(services.order, `/v1/orders/${encodeURIComponent(order.id)}`, { method: 'POST', headers: context, body: JSON.stringify({ status: 'paid' }) });
+        const payment = await request(services.payment, `/v1/payments/${encodeURIComponent(paymentMatch[1])}/confirm`, { service: 'payment', method: 'POST', headers: context, body: '{}' });
+        await request(services.order, `/v1/orders/${encodeURIComponent(order.id)}`, { service: 'order', method: 'POST', headers: context, body: JSON.stringify({ status: 'paid' }) });
         return json(res, 200, variant === 'app' ? { paymentId: payment.id, state: 'paid', orderId: payment.order_id } : { payment, orderStatus: 'paid' });
       }
       return json(res, 404, { error: 'not_found' });
@@ -108,6 +113,6 @@ async function auditEvents(req, services, context) {
   const params = new URL(req.url, 'http://localhost').searchParams;
   const selectedService = params.get('service');
   if (selectedService && !['order', 'inventory', 'payment'].includes(selectedService)) { const error = new Error('invalid_audit_service'); error.status = 400; throw error; }
-  const body = await request(services.audit, `/v1/audit/events?${params.toString()}`, { headers: context });
+  const body = await request(services.audit, `/v1/audit/events${params.size ? `?${params.toString()}` : ''}`, { headers: context, service: 'audit-worker' });
   return { ...body, source: 'audit-worker' };
 }

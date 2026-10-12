@@ -8,12 +8,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"poc/security"
 	"strings"
 	"testing"
 )
 
 func setupOrderTestDB(t *testing.T) {
 	t.Helper()
+	previousAuth := serviceAuth
+	serviceAuth = &security.Auth{Name: "order", Outgoing: map[string][]byte{"inventory": make([]byte, 32), "payment": make([]byte, 32)}}
+	t.Cleanup(func() { serviceAuth = previousAuth })
 	previous := db
 	testDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "order.db"))
 	if err != nil {

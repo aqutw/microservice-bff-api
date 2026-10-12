@@ -2,18 +2,27 @@
 # Run against a dedicated Compose project, with freshly created volumes.
 set -euo pipefail
 
-DESKTOP_BFF_URL=${DESKTOP_BFF_URL:-http://localhost:3001}
-APP_BFF_URL=${APP_BFF_URL:-http://localhost:3002}
-ORDER_API_URL=${ORDER_API_URL:-http://localhost:8081}
-INVENTORY_API_URL=${INVENTORY_API_URL:-http://localhost:8082}
-PAYMENT_API_URL=${PAYMENT_API_URL:-http://localhost:8083}
-AUDIT_API_URL=${AUDIT_API_URL:-http://localhost:8084}
+DESKTOP_BFF_URL=${DESKTOP_BFF_URL:-https://localhost:3001}
+APP_BFF_URL=${APP_BFF_URL:-https://localhost:3002}
+ORDER_API_URL=${ORDER_API_URL:-https://localhost:8081}
+INVENTORY_API_URL=${INVENTORY_API_URL:-https://localhost:8082}
+PAYMENT_API_URL=${PAYMENT_API_URL:-https://localhost:8083}
+AUDIT_API_URL=${AUDIT_API_URL:-https://localhost:8084}
 WEBSITE_URL=${WEBSITE_URL:-http://localhost:3000}
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-for executable in curl jq docker; do
+export CURL_CA_BUNDLE=${CURL_CA_BUNDLE:-"$PWD/.security/pki/ca.pem"}
+for executable in curl jq docker node; do
   command -v "$executable" >/dev/null || { echo "Missing prerequisite: $executable" >&2; exit 1; }
 done
+
+SECURITY_ENV_FILE=${SECURITY_ENV_FILE:-.env.security}
+export SECURITY_ENV_FILE
+node scripts/test-tokens.mjs "$SECURITY_ENV_FILE"
+set -a
+source .security/tokens.env
+set +a
+internal_headers() { node scripts/request-headers.mjs "$@"; }
 
 artifacts_dir=artifacts/sit
 mkdir -p "$artifacts_dir"
@@ -37,9 +46,15 @@ call() {
   local status
   local args=(--silent --show-error --max-time 10 --request "$method"
     --header 'content-type: application/json'
-    --header 'x-actor-id: sit-runner' --header "x-correlation-id: $correlation"
+    --header "authorization: Bearer $SIT_TOKEN" --header "x-correlation-id: $correlation"
     --header "idempotency-key: $correlation-$label"
     --output "$artifacts_dir/$label.json" --write-out '%{http_code}')
+  local target="" caller=order
+  if [[ "$url" == "$INVENTORY_API_URL"/* ]]; then target=inventory; fi
+  if [[ "$url" == "$AUDIT_API_URL"/* && "$method" == POST ]]; then target=audit-worker; caller=$(jq -r .service <<< "$payload"); fi
+  if [[ -n "$target" ]]; then
+    while IFS= read -r header; do args+=(--header "$header"); done < <(internal_headers "$target" "$caller" "$method" "$url" "$payload" "$correlation" "$correlation-$label")
+  fi
   if [[ -n "$payload" ]]; then args+=(--data "$payload"); fi
   status=$(curl "${args[@]}" "$url")
   # Checkout may be claimed by recovery before the initiating HTTP request.
@@ -49,7 +64,7 @@ call() {
     checkout_id=$(jq -er .checkoutId "$artifacts_dir/$label.json")
     cp "$artifacts_dir/$label.json" "$artifacts_dir/$label-accepted.json"
     for attempt in {1..90}; do
-      status=$(curl --silent --show-error --max-time 5 --output "$artifacts_dir/$label.json" --write-out '%{http_code}' "${url%/api/checkout}/api/checkouts/$checkout_id")
+      status=$(curl --silent --show-error --header "authorization: Bearer $SIT_TOKEN" --max-time 5 --output "$artifacts_dir/$label.json" --write-out '%{http_code}' "${url%/api/checkout}/api/checkouts/$checkout_id")
       [[ "$status" != 202 ]] && break
       sleep 1
     done
@@ -59,12 +74,16 @@ call() {
 }
 
 assert_json() { jq -e "$2" "$artifacts_dir/$1.json" >/dev/null || fail "$1: $2"; }
-stock() { curl --fail --silent --show-error --max-time 5 "${INVENTORY_API_URL}/v1/stock/$1" | jq -er .available; }
+stock() {
+ local url="${INVENTORY_API_URL}/v1/stock/$1" args=()
+ while IFS= read -r header; do args+=(--header "$header"); done < <(internal_headers inventory order GET "$url")
+ curl --fail --silent --show-error --max-time 5 "${args[@]}" "$url" | jq -er .available
+}
 
 wait_audit() {
   local correlation=$1 expected=$2 label=$3
   for ((attempt=0; attempt<60; attempt++)); do
-    if curl --fail --silent --max-time 3 \
+    if curl --fail --silent --header "authorization: Bearer $SIT_TOKEN" --max-time 3 \
       "${DESKTOP_BFF_URL}/api/audit/events?correlation_id=$correlation&limit=100" \
       > "$artifacts_dir/$label.json" && \
       jq -e --argjson expected "$expected" '.count == $expected and (.events | length) == $expected' \
@@ -103,7 +122,7 @@ assert_json duplicate-confirm '.payment.status == "paid" and .orderStatus == "pa
 call 200 desktop-commit POST "${INVENTORY_API_URL}/v1/reservations/$reservation_id/commit" "$correlation"
 assert_json desktop-commit '.status == "committed"'
 wait_audit "$correlation" 6 desktop-audit
-assert_json desktop-audit '([.events[].service] | unique | sort) == ["inventory","order","payment"] and all(.events[]; .actor_id == "sit-runner")'
+assert_json desktop-audit '([.events[].service] | unique | sort) == ["inventory","order","payment"] and all(.events[]; (.actor_id | startswith("usr_")))'
 pass 'Desktop checkout, payment, inventory commit and correlated audit delivery'
 
 correlation="$run_id-app"
@@ -143,7 +162,7 @@ wait_http ${ORDER_API_URL}/healthz
 docker compose start payment
 wait_http ${PAYMENT_API_URL}/healthz
 for attempt in {1..90}; do
-  status=$(curl --silent --show-error --max-time 5 --output "$artifacts_dir/payment-recovery.json" --write-out '%{http_code}' "${DESKTOP_BFF_URL}/api/checkouts/$checkout_id")
+  status=$(curl --silent --show-error --header "authorization: Bearer $SIT_TOKEN" --max-time 5 --output "$artifacts_dir/payment-recovery.json" --write-out '%{http_code}' "${DESKTOP_BFF_URL}/api/checkouts/$checkout_id")
   if [[ "$status" == 200 ]] && jq -e '.state == "awaiting_payment"' "$artifacts_dir/payment-recovery.json" >/dev/null; then break; fi
   sleep 1
 done

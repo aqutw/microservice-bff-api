@@ -1,3 +1,4 @@
+import { storeSession, loadSession, deleteSession } from './session-store.mjs';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { EncryptJWT, jwtDecrypt, createRemoteJWKSet, jwtVerify } from 'jose';
 import * as oidc from 'openid-client';
@@ -17,9 +18,9 @@ export function authSettings(env = process.env) {
     if (url.username || url.password || url.hash || !['https:', 'http:'].includes(url.protocol) || (!allowHTTP && url.protocol !== 'https:')) throw new Error('HTTPS required');
   }
   const key = Buffer.from(env.SESSION_SECRET || '', 'base64url');
-  if (key.length !== 32 || !env.OIDC_CLIENT_ID || !env.OIDC_CLIENT_SECRET || !env.AUTH_AUDIENCE) throw new Error('Missing authentication settings');
+  if (key.length !== 32 || !env.SESSION_STORE_DIR || !env.OIDC_CLIENT_ID || !env.OIDC_CLIENT_SECRET || !env.AUTH_AUDIENCE) throw new Error('Missing authentication settings');
   if ((env.AUTH_ALGORITHMS || 'RS256').split(',').some(value => !['RS256', 'ES256', 'EdDSA'].includes(value))) throw new Error('Unsupported access token algorithm');
-  return { issuer, publicURL, jwksURL, key, allowHTTP, secure: publicURL.protocol === 'https:', clientId: env.OIDC_CLIENT_ID, clientSecret: env.OIDC_CLIENT_SECRET, audience: env.AUTH_AUDIENCE };
+  return { storeDirectory: env.SESSION_STORE_DIR, issuer, publicURL, jwksURL, key, allowHTTP, secure: publicURL.protocol === 'https:', clientId: env.OIDC_CLIENT_ID, clientSecret: env.OIDC_CLIENT_SECRET, audience: env.AUTH_AUDIENCE };
 }
 
 async function configuration(settings) {
@@ -48,29 +49,41 @@ async function seal(payload, purpose, settings, ttl) {
 async function unseal(value, purpose, settings) {
   return (await jwtDecrypt(value, settings.key, { issuer: settings.publicURL.origin, audience: purpose, keyManagementAlgorithms: ['dir'], contentEncryptionAlgorithms: ['A256GCM'] })).payload;
 }
+function cookieName(name, settings) { return settings.secure ? `__Host-${name}` : name; }
 function cookie(request, name) {
   return (request.headers.get('cookie') || '').split(';').map(part => part.trim()).find(part => part.startsWith(`${name}=`))?.slice(name.length + 1);
 }
 function setCookie(response, name, value, settings, ttl) {
-  response.headers.append('set-cookie', `${name}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${ttl}${settings.secure ? '; Secure' : ''}`);
+  response.headers.append('set-cookie', `${cookieName(name, settings)}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${ttl}${settings.secure ? '; Secure' : ''}`);
 }
 function clearSession(response, settings) {
   for (let part = 0; part < 4; part++) setCookie(response, part ? `${sessionCookie}.${part}` : sessionCookie, '', settings, 0);
 }
+export async function createStoredSession(payload, settings, ttl) {
+  const ciphertext = await seal(payload, 'session-data', settings, ttl);
+  const record = await storeSession(settings.storeDirectory, ciphertext, ttl);
+  return seal({ record }, 'session', settings, ttl);
+}
+export async function revokeSession(session, settings) { await deleteSession(settings.storeDirectory, session.record); }
 export async function readSession(request, settings = authSettings()) {
+  let reference;
   try {
-    let value = cookie(request, sessionCookie);
-    if (!value) return null;
-    for (let part = 1; part < 4; part++) value += cookie(request, `${sessionCookie}.${part}`) || '';
-    if (value.length > 14400) return null;
-    const session = await unseal(value, 'session', settings);
-    return typeof session.accessToken === 'string' && typeof session.csrf === 'string' ? session : null;
+    const value = cookie(request, cookieName(sessionCookie, settings));
+    if (!value || value.length > 3800) return null;
+    reference = await unseal(value, 'session', settings);
+  } catch { return null; }
+  const ciphertext = await loadSession(settings.storeDirectory, reference.record);
+  if (!ciphertext) return null;
+  try {
+    const session = await unseal(ciphertext, 'session-data', settings);
+    return typeof session.accessToken === 'string' && typeof session.csrf === 'string' ? { ...session, record: reference.record } : null;
   } catch { return null; }
 }
 export function validMutation(request, session, settings = authSettings()) {
   const provided = request.headers.get('x-csrf-token') || '';
   const expected = session?.csrf || '';
-  return request.headers.get('origin') === settings.publicURL.origin && expected.length > 0 && provided.length === expected.length && timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+  const actual = Buffer.from(provided), wanted = Buffer.from(expected);
+  return request.headers.get('origin') === settings.publicURL.origin && wanted.length > 0 && actual.length === wanted.length && timingSafeEqual(actual, wanted);
 }
 function response(body, status = 200) {
   return Response.json(body, { status, headers: { 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } });
@@ -80,13 +93,16 @@ export async function authRoute(request, action) {
   let settings;
   try { settings = authSettings(); } catch { return response({ error: 'auth_not_configured' }, 503); }
   if (action === 'session' && request.method === 'GET') {
-    const session = await readSession(request, settings);
+    let session;
+    try { session = await readSession(request, settings); } catch { return response({error:'session_store_unavailable'},503); }
     return response(session ? { authenticated: true, user: session.user, csrfToken: session.csrf } : { authenticated: false });
   }
   if (action === 'logout' && request.method === 'POST') {
-    const session = await readSession(request, settings);
+    let session;
+    try { session = await readSession(request, settings); } catch { return response({error:'session_store_unavailable'},503); }
     if (!session) return response({ error: 'unauthorized' }, 401);
     if (!validMutation(request, session, settings)) return response({ error: 'csrf_rejected' }, 403);
+    try { await revokeSession(session,settings); } catch { return response({error:'session_store_unavailable'},503); }
     let logoutURL = settings.publicURL.origin;
     try {
       const config = await configuration(settings);
@@ -111,7 +127,7 @@ export async function authRoute(request, action) {
       setCookie(result, transactionCookie, await seal(transaction, 'login', settings, 300), settings, 300);
       return result;
     }
-    const transaction = await unseal(cookie(request, transactionCookie) || '', 'login', settings);
+    const transaction = await unseal(cookie(request, cookieName(transactionCookie, settings)) || '', 'login', settings);
     // Use configured public origin, never an untrusted Host or forwarded header.
     const callback = new URL(`${settings.publicURL.origin}/auth/callback`);
     callback.search = new URL(request.url).search;
@@ -123,11 +139,11 @@ export async function authRoute(request, action) {
     const ttl = Math.min(1800, Math.floor(payload.exp - Date.now() / 1000));
     if (ttl <= 0) throw new Error('expired_token');
     const user = { name: tokens.claims().name || tokens.claims().preferred_username || payload.sub, auditRead: (payload.scope || '').split(' ').includes('audit:read') || payload.realm_access?.roles?.includes('audit-reader') || false };
-    const sealed = await seal({ accessToken: tokens.access_token, idToken: tokens.id_token, user, csrf: randomBytes(32).toString('base64url') }, 'session', settings, ttl);
-    if (sealed.length > 14400) throw new Error('session_too_large');
+    const sealed = await createStoredSession({ accessToken: tokens.access_token, idToken: tokens.id_token, user, csrf: randomBytes(32).toString('base64url') }, settings, ttl);
+    if (sealed.length > 3800) throw new Error('session_too_large');
     const result = new Response(null, { status: 302, headers: { location: new URL(transaction.returnTo, settings.publicURL).href, 'cache-control': 'no-store', 'referrer-policy': 'no-referrer' } });
     clearSession(result, settings);
-    for (let part = 0; part < Math.ceil(sealed.length / 3600); part++) setCookie(result, part ? `${sessionCookie}.${part}` : sessionCookie, sealed.slice(part * 3600, (part + 1) * 3600), settings, ttl);
+    setCookie(result, sessionCookie, sealed, settings, ttl);
     setCookie(result, transactionCookie, '', settings, 0);
     return result;
   } catch {

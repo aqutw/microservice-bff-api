@@ -1,3 +1,4 @@
+---
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -5,193 +6,1215 @@ metadata:
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: {name: audit-data, namespace: commerce-poc}
-spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata: {name: audit-worker, namespace: commerce-poc}
+metadata:
+  name: website-session-data
+  namespace: commerce-poc
 spec:
-  replicas: 1
-  selector: {matchLabels: {app: audit-worker}}
-  template:
-    metadata: {labels: {app: audit-worker}}
-    spec:
-      containers:
-        - name: audit-worker
-          image: poc/audit-worker:dev
-          ports: [{containerPort: 8084}]
-          env: [{name: PORT, value: "8084"}, {name: DB_PATH, value: /data/audit.db}]
-          volumeMounts: [{name: data, mountPath: /data}]
-          readinessProbe: {httpGet: {path: /healthz, port: 8084}, initialDelaySeconds: 2}
-      volumes: [{name: data, persistentVolumeClaim: {claimName: audit-data}}]
----
-apiVersion: v1
-kind: Service
-metadata: {name: audit-worker, namespace: commerce-poc}
-spec: {selector: {app: audit-worker}, ports: [{port: 8084, targetPort: 8084}]}
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: {name: inventory-data, namespace: commerce-poc}
-spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}}
+metadata:
+  name: audit-data
+  namespace: commerce-poc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-worker
+  namespace: commerce-poc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audit-worker
+  template:
+    metadata:
+      labels:
+        app: audit-worker
+    spec:
+      containers:
+      - name: audit-worker
+        image: poc/audit-worker:dev
+        ports:
+        - containerPort: 8084
+        env:
+        - name: PORT
+          value: '8084'
+        - name: DB_PATH
+          value: "/data/audit.db"
+        - name: NODE_EXTRA_CA_CERTS
+          value: "/run/tls/ca.crt"
+        - name: SERVICE_NAME
+          value: audit-worker
+        - name: SERVICE_OUTGOING_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUDIT_WORKER_OUTGOING_KEYS
+        - name: SERVICE_TLS_CERT
+          value: "/run/tls/tls.crt"
+        - name: SERVICE_TLS_KEY
+          value: "/run/tls/tls.key"
+        - name: SERVICE_CA_FILE
+          value: "/run/tls/ca.crt"
+        - name: SERVICE_INCOMING_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUDIT_WORKER_INCOMING_KEYS
+        volumeMounts:
+        - name: data
+          mountPath: "/data"
+        - name: service-tls
+          mountPath: "/run/tls"
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: "/healthz"
+            port: 8084
+            scheme: HTTPS
+          initialDelaySeconds: 2
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: audit-data
+      - name: service-tls
+        secret:
+          secretName: commerce-audit-worker-tls
+          defaultMode: 288
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-worker
+  namespace: commerce-poc
+spec:
+  selector:
+    app: audit-worker
+  ports:
+  - port: 8084
+    targetPort: 8084
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: {name: order-data, namespace: commerce-poc}
-spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}}
+metadata:
+  name: inventory-data
+  namespace: commerce-poc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
-metadata: {name: payment-data, namespace: commerce-poc}
-spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 1Gi}}}
+metadata:
+  name: order-data
+  namespace: commerce-poc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: payment-data
+  namespace: commerce-poc
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: inventory, namespace: commerce-poc}
+metadata:
+  name: inventory
+  namespace: commerce-poc
 spec:
   replicas: 1
-  selector: {matchLabels: {app: inventory}}
+  selector:
+    matchLabels:
+      app: inventory
   template:
-    metadata: {labels: {app: inventory}}
+    metadata:
+      labels:
+        app: inventory
     spec:
       containers:
-        - name: inventory
-          image: poc/inventory:dev
-          ports: [{containerPort: 8082}]
-          env: [{name: PORT, value: "8082"}, {name: DB_PATH, value: /data/inventory.db}, {name: AUDIT_WORKER_URL, value: http://audit-worker:8084}]
-          volumeMounts: [{name: data, mountPath: /data}]
-          readinessProbe: {httpGet: {path: /healthz, port: 8082}, initialDelaySeconds: 2}
-      volumes: [{name: data, persistentVolumeClaim: {claimName: inventory-data}}]
+      - name: inventory
+        image: poc/inventory:dev
+        ports:
+        - containerPort: 8082
+        env:
+        - name: PORT
+          value: '8082'
+        - name: DB_PATH
+          value: "/data/inventory.db"
+        - name: AUDIT_WORKER_URL
+          value: https://audit-worker:8084
+        - name: NODE_EXTRA_CA_CERTS
+          value: "/run/tls/ca.crt"
+        - name: SERVICE_NAME
+          value: inventory
+        - name: SERVICE_OUTGOING_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: INVENTORY_OUTGOING_KEYS
+        - name: SERVICE_TLS_CERT
+          value: "/run/tls/tls.crt"
+        - name: SERVICE_TLS_KEY
+          value: "/run/tls/tls.key"
+        - name: SERVICE_CA_FILE
+          value: "/run/tls/ca.crt"
+        - name: SERVICE_INCOMING_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: INVENTORY_INCOMING_KEYS
+        volumeMounts:
+        - name: data
+          mountPath: "/data"
+        - name: service-tls
+          mountPath: "/run/tls"
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: "/healthz"
+            port: 8082
+            scheme: HTTPS
+          initialDelaySeconds: 2
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: inventory-data
+      - name: service-tls
+        secret:
+          secretName: commerce-inventory-tls
+          defaultMode: 288
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: inventory, namespace: commerce-poc}
-spec: {selector: {app: inventory}, ports: [{port: 8082, targetPort: 8082}]}
+metadata:
+  name: inventory
+  namespace: commerce-poc
+spec:
+  selector:
+    app: inventory
+  ports:
+  - port: 8082
+    targetPort: 8082
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: order, namespace: commerce-poc}
+metadata:
+  name: order
+  namespace: commerce-poc
 spec:
   replicas: 1
-  selector: {matchLabels: {app: order}}
+  selector:
+    matchLabels:
+      app: order
   template:
-    metadata: {labels: {app: order}}
+    metadata:
+      labels:
+        app: order
     spec:
       containers:
-        - name: order
-          image: poc/order:dev
-          ports: [{containerPort: 8081}]
-          env: [{name: PORT, value: "8081"}, {name: DB_PATH, value: /data/order.db}, {name: AUDIT_WORKER_URL, value: http://audit-worker:8084}, {name: INVENTORY_API_URL, value: http://inventory:8082}, {name: PAYMENT_API_URL, value: http://payment:8083}]
-          volumeMounts: [{name: data, mountPath: /data}]
-          readinessProbe: {httpGet: {path: /healthz, port: 8081}, initialDelaySeconds: 2}
-      volumes: [{name: data, persistentVolumeClaim: {claimName: order-data}}]
+      - name: order
+        image: poc/order:dev
+        ports:
+        - containerPort: 8081
+        env:
+        - name: PORT
+          value: '8081'
+        - name: DB_PATH
+          value: "/data/order.db"
+        - name: AUDIT_WORKER_URL
+          value: https://audit-worker:8084
+        - name: INVENTORY_API_URL
+          value: https://inventory:8082
+        - name: PAYMENT_API_URL
+          value: https://payment:8083
+        - name: NODE_EXTRA_CA_CERTS
+          value: "/run/tls/ca.crt"
+        - name: SERVICE_NAME
+          value: order
+        - name: SERVICE_OUTGOING_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: ORDER_OUTGOING_KEYS
+        - name: SERVICE_TLS_CERT
+          value: "/run/tls/tls.crt"
+        - name: SERVICE_TLS_KEY
+          value: "/run/tls/tls.key"
+        - name: SERVICE_CA_FILE
+          value: "/run/tls/ca.crt"
+        - name: SERVICE_INCOMING_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: ORDER_INCOMING_KEYS
+        volumeMounts:
+        - name: data
+          mountPath: "/data"
+        - name: service-tls
+          mountPath: "/run/tls"
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: "/healthz"
+            port: 8081
+            scheme: HTTPS
+          initialDelaySeconds: 2
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: order-data
+      - name: service-tls
+        secret:
+          secretName: commerce-order-tls
+          defaultMode: 288
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: order, namespace: commerce-poc}
-spec: {selector: {app: order}, ports: [{port: 8081, targetPort: 8081}]}
+metadata:
+  name: order
+  namespace: commerce-poc
+spec:
+  selector:
+    app: order
+  ports:
+  - port: 8081
+    targetPort: 8081
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: payment, namespace: commerce-poc}
+metadata:
+  name: payment
+  namespace: commerce-poc
 spec:
   replicas: 1
-  selector: {matchLabels: {app: payment}}
+  selector:
+    matchLabels:
+      app: payment
   template:
-    metadata: {labels: {app: payment}}
+    metadata:
+      labels:
+        app: payment
     spec:
       containers:
-        - name: payment
-          image: poc/payment:dev
-          ports: [{containerPort: 8083}]
-          env: [{name: PORT, value: "8083"}, {name: DB_PATH, value: /data/payment.db}, {name: AUDIT_WORKER_URL, value: http://audit-worker:8084}]
-          volumeMounts: [{name: data, mountPath: /data}]
-          readinessProbe: {httpGet: {path: /healthz, port: 8083}, initialDelaySeconds: 2}
-      volumes: [{name: data, persistentVolumeClaim: {claimName: payment-data}}]
+      - name: payment
+        image: poc/payment:dev
+        ports:
+        - containerPort: 8083
+        env:
+        - name: PORT
+          value: '8083'
+        - name: DB_PATH
+          value: "/data/payment.db"
+        - name: AUDIT_WORKER_URL
+          value: https://audit-worker:8084
+        - name: NODE_EXTRA_CA_CERTS
+          value: "/run/tls/ca.crt"
+        - name: SERVICE_NAME
+          value: payment
+        - name: SERVICE_OUTGOING_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: PAYMENT_OUTGOING_KEYS
+        - name: SERVICE_TLS_CERT
+          value: "/run/tls/tls.crt"
+        - name: SERVICE_TLS_KEY
+          value: "/run/tls/tls.key"
+        - name: SERVICE_CA_FILE
+          value: "/run/tls/ca.crt"
+        - name: SERVICE_INCOMING_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: PAYMENT_INCOMING_KEYS
+        - name: ORDER_API_URL
+          value: https://order:8081
+        volumeMounts:
+        - name: data
+          mountPath: "/data"
+        - name: service-tls
+          mountPath: "/run/tls"
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: "/healthz"
+            port: 8083
+            scheme: HTTPS
+          initialDelaySeconds: 2
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: payment-data
+      - name: service-tls
+        secret:
+          secretName: commerce-payment-tls
+          defaultMode: 288
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: payment, namespace: commerce-poc}
-spec: {selector: {app: payment}, ports: [{port: 8083, targetPort: 8083}]}
+metadata:
+  name: payment
+  namespace: commerce-poc
+spec:
+  selector:
+    app: payment
+  ports:
+  - port: 8083
+    targetPort: 8083
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: desktop-bff, namespace: commerce-poc}
+metadata:
+  name: desktop-bff
+  namespace: commerce-poc
 spec:
   replicas: 1
-  selector: {matchLabels: {app: desktop-bff}}
+  selector:
+    matchLabels:
+      app: desktop-bff
   template:
-    metadata: {labels: {app: desktop-bff}}
+    metadata:
+      labels:
+        app: desktop-bff
     spec:
       containers:
-        - name: desktop-bff
-          image: poc/bff-api:dev
-          command: [node, src/desktop.js]
-          ports: [{containerPort: 3001}]
-          env:
-            - {name: PORT, value: "3001"}
-            - {name: ORDER_API_URL, value: http://order:8081}
-            - {name: INVENTORY_API_URL, value: http://inventory:8082}
-            - {name: PAYMENT_API_URL, value: http://payment:8083}
-            - {name: AUDIT_API_URL, value: http://audit-worker:8084}
+      - name: desktop-bff
+        image: poc/bff-api:dev
+        command:
+        - node
+        - src/desktop.js
+        ports:
+        - containerPort: 3001
+        env:
+        - name: PORT
+          value: '3001'
+        - name: ORDER_API_URL
+          value: https://order:8081
+        - name: INVENTORY_API_URL
+          value: https://inventory:8082
+        - name: PAYMENT_API_URL
+          value: https://payment:8083
+        - name: AUDIT_API_URL
+          value: https://audit-worker:8084
+        - name: NODE_EXTRA_CA_CERTS
+          value: "/run/tls/ca.crt"
+        - name: SERVICE_NAME
+          value: desktop-bff
+        - name: SERVICE_OUTGOING_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: DESKTOP_BFF_OUTGOING_KEYS
+        - name: SERVICE_TLS_CERT
+          value: "/run/tls/tls.crt"
+        - name: SERVICE_TLS_KEY
+          value: "/run/tls/tls.key"
+        - name: SERVICE_CA_FILE
+          value: "/run/tls/ca.crt"
+        - name: AUTH_ISSUER
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUTH_ISSUER
+        - name: AUTH_AUDIENCE
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUTH_AUDIENCE
+        - name: AUTH_JWKS_URL
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUTH_JWKS_URL
+        - name: DEPLOYMENT_ENV
+          value: production
+        - name: ALLOWED_ORIGINS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: PUBLIC_URL
+        - name: AUTH_ALGORITHMS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUTH_ALGORITHMS
+              optional: true
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: service-tls
+          mountPath: "/run/tls"
+          readOnly: true
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      volumes:
+      - name: service-tls
+        secret:
+          secretName: commerce-desktop-bff-tls
+          defaultMode: 288
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: desktop-bff, namespace: commerce-poc}
+metadata:
+  name: desktop-bff
+  namespace: commerce-poc
 spec:
-  type: NodePort
-  selector: {app: desktop-bff}
-  ports: [{port: 3001, targetPort: 3001, nodePort: 30001}]
+  selector:
+    app: desktop-bff
+  ports:
+  - port: 3001
+    targetPort: 3001
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: app-bff, namespace: commerce-poc}
+metadata:
+  name: app-bff
+  namespace: commerce-poc
 spec:
   replicas: 1
-  selector: {matchLabels: {app: app-bff}}
+  selector:
+    matchLabels:
+      app: app-bff
   template:
-    metadata: {labels: {app: app-bff}}
+    metadata:
+      labels:
+        app: app-bff
     spec:
       containers:
-        - name: app-bff
-          image: poc/bff-api:dev
-          command: [node, src/app.js]
-          ports: [{containerPort: 3002}]
-          env:
-            - {name: PORT, value: "3002"}
-            - {name: ORDER_API_URL, value: http://order:8081}
-            - {name: INVENTORY_API_URL, value: http://inventory:8082}
-            - {name: PAYMENT_API_URL, value: http://payment:8083}
-            - {name: AUDIT_API_URL, value: http://audit-worker:8084}
+      - name: app-bff
+        image: poc/bff-api:dev
+        command:
+        - node
+        - src/app.js
+        ports:
+        - containerPort: 3002
+        env:
+        - name: PORT
+          value: '3002'
+        - name: ORDER_API_URL
+          value: https://order:8081
+        - name: INVENTORY_API_URL
+          value: https://inventory:8082
+        - name: PAYMENT_API_URL
+          value: https://payment:8083
+        - name: AUDIT_API_URL
+          value: https://audit-worker:8084
+        - name: NODE_EXTRA_CA_CERTS
+          value: "/run/tls/ca.crt"
+        - name: SERVICE_NAME
+          value: app-bff
+        - name: SERVICE_OUTGOING_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: APP_BFF_OUTGOING_KEYS
+        - name: SERVICE_TLS_CERT
+          value: "/run/tls/tls.crt"
+        - name: SERVICE_TLS_KEY
+          value: "/run/tls/tls.key"
+        - name: SERVICE_CA_FILE
+          value: "/run/tls/ca.crt"
+        - name: AUTH_ISSUER
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUTH_ISSUER
+        - name: AUTH_AUDIENCE
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUTH_AUDIENCE
+        - name: AUTH_JWKS_URL
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUTH_JWKS_URL
+        - name: DEPLOYMENT_ENV
+          value: production
+        - name: ALLOWED_ORIGINS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: PUBLIC_URL
+        - name: AUTH_ALGORITHMS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUTH_ALGORITHMS
+              optional: true
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: service-tls
+          mountPath: "/run/tls"
+          readOnly: true
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      volumes:
+      - name: service-tls
+        secret:
+          secretName: commerce-app-bff-tls
+          defaultMode: 288
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: app-bff, namespace: commerce-poc}
+metadata:
+  name: app-bff
+  namespace: commerce-poc
 spec:
-  type: NodePort
-  selector: {app: app-bff}
-  ports: [{port: 3002, targetPort: 3002, nodePort: 30002}]
+  selector:
+    app: app-bff
+  ports:
+  - port: 3002
+    targetPort: 3002
 ---
 apiVersion: apps/v1
 kind: Deployment
-metadata: {name: website, namespace: commerce-poc}
+metadata:
+  name: website
+  namespace: commerce-poc
 spec:
   replicas: 1
-  selector: {matchLabels: {app: website}}
+  selector:
+    matchLabels:
+      app: website
   template:
-    metadata: {labels: {app: website}}
+    metadata:
+      labels:
+        app: website
     spec:
       containers:
-        - name: website
-          image: poc/website:dev
-          ports: [{containerPort: 3000}]
-          env: [{name: BFF_URL, value: http://desktop-bff:3001}]
+      - name: website
+        image: poc/website:dev
+        ports:
+        - containerPort: 3000
+        env:
+        - name: BFF_URL
+          value: https://desktop-bff:3001
+        - name: NODE_EXTRA_CA_CERTS
+          value: "/run/tls/ca.crt"
+        - name: AUTH_ISSUER
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUTH_ISSUER
+        - name: AUTH_AUDIENCE
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUTH_AUDIENCE
+        - name: AUTH_JWKS_URL
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUTH_JWKS_URL
+        - name: DEPLOYMENT_ENV
+          value: production
+        - name: PUBLIC_URL
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: PUBLIC_URL
+        - name: OIDC_CLIENT_ID
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: OIDC_CLIENT_ID
+        - name: OIDC_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: OIDC_CLIENT_SECRET
+        - name: SESSION_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: SESSION_SECRET
+        - name: SESSION_STORE_DIR
+          value: "/data/sessions"
+        - name: AUTH_ALGORITHMS
+          valueFrom:
+            secretKeyRef:
+              name: commerce-security
+              key: AUTH_ALGORITHMS
+              optional: true
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: service-tls
+          mountPath: "/run/tls"
+          readOnly: true
+        - name: sessions
+          mountPath: "/data"
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      volumes:
+      - name: service-tls
+        secret:
+          secretName: commerce-website-ca
+          defaultMode: 288
+      - name: sessions
+        persistentVolumeClaim:
+          claimName: website-session-data
 ---
 apiVersion: v1
 kind: Service
-metadata: {name: website, namespace: commerce-poc}
+metadata:
+  name: website
+  namespace: commerce-poc
 spec:
-  type: NodePort
-  selector: {app: website}
-  ports: [{port: 3000, targetPort: 3000, nodePort: 30000}]
+  selector:
+    app: website
+  ports:
+  - port: 3000
+    targetPort: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: website-access
+  namespace: commerce-poc
+spec:
+  podSelector:
+    matchLabels:
+      app: website
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          commerce-edge: 'true'
+    ports:
+    - protocol: TCP
+      port: 3000
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - podSelector:
+        matchLabels:
+          app: desktop-bff
+    ports:
+    - protocol: TCP
+      port: 3001
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: desktop-bff-access
+  namespace: commerce-poc
+spec:
+  podSelector:
+    matchLabels:
+      app: desktop-bff
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: website
+    ports:
+    - protocol: TCP
+      port: 3001
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - podSelector:
+        matchLabels:
+          app: order
+    ports:
+    - protocol: TCP
+      port: 8081
+  - to:
+    - podSelector:
+        matchLabels:
+          app: payment
+    ports:
+    - protocol: TCP
+      port: 8083
+  - to:
+    - podSelector:
+        matchLabels:
+          app: audit-worker
+    ports:
+    - protocol: TCP
+      port: 8084
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-bff-access
+  namespace: commerce-poc
+spec:
+  podSelector:
+    matchLabels:
+      app: app-bff
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          commerce-edge: 'true'
+    ports:
+    - protocol: TCP
+      port: 3002
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - podSelector:
+        matchLabels:
+          app: order
+    ports:
+    - protocol: TCP
+      port: 8081
+  - to:
+    - podSelector:
+        matchLabels:
+          app: payment
+    ports:
+    - protocol: TCP
+      port: 8083
+  - to:
+    - podSelector:
+        matchLabels:
+          app: audit-worker
+    ports:
+    - protocol: TCP
+      port: 8084
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+    ports:
+    - protocol: TCP
+      port: 443
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: order-access
+  namespace: commerce-poc
+spec:
+  podSelector:
+    matchLabels:
+      app: order
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: desktop-bff
+    - podSelector:
+        matchLabels:
+          app: app-bff
+    - podSelector:
+        matchLabels:
+          app: payment
+    ports:
+    - protocol: TCP
+      port: 8081
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - podSelector:
+        matchLabels:
+          app: inventory
+    ports:
+    - protocol: TCP
+      port: 8082
+  - to:
+    - podSelector:
+        matchLabels:
+          app: payment
+    ports:
+    - protocol: TCP
+      port: 8083
+  - to:
+    - podSelector:
+        matchLabels:
+          app: audit-worker
+    ports:
+    - protocol: TCP
+      port: 8084
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: inventory-access
+  namespace: commerce-poc
+spec:
+  podSelector:
+    matchLabels:
+      app: inventory
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: order
+    ports:
+    - protocol: TCP
+      port: 8082
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - podSelector:
+        matchLabels:
+          app: audit-worker
+    ports:
+    - protocol: TCP
+      port: 8084
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: payment-access
+  namespace: commerce-poc
+spec:
+  podSelector:
+    matchLabels:
+      app: payment
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: desktop-bff
+    - podSelector:
+        matchLabels:
+          app: app-bff
+    - podSelector:
+        matchLabels:
+          app: order
+    ports:
+    - protocol: TCP
+      port: 8083
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - podSelector:
+        matchLabels:
+          app: order
+    ports:
+    - protocol: TCP
+      port: 8081
+  - to:
+    - podSelector:
+        matchLabels:
+          app: audit-worker
+    ports:
+    - protocol: TCP
+      port: 8084
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: audit-worker-access
+  namespace: commerce-poc
+spec:
+  podSelector:
+    matchLabels:
+      app: audit-worker
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: desktop-bff
+    - podSelector:
+        matchLabels:
+          app: app-bff
+    - podSelector:
+        matchLabels:
+          app: order
+    - podSelector:
+        matchLabels:
+          app: inventory
+    - podSelector:
+        matchLabels:
+          app: payment
+    ports:
+    - protocol: TCP
+      port: 8084
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: commerce
+  namespace: commerce-poc
+spec:
+  gatewayClassName: commerce-gateway
+  infrastructure:
+    labels:
+      commerce-edge: 'true'
+  listeners:
+  - name: http
+    port: 80
+    protocol: HTTP
+  - name: website
+    port: 443
+    protocol: HTTPS
+    hostname: commerce.example.com
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - kind: Secret
+        name: commerce-edge-tls
+  - name: app-api
+    port: 443
+    protocol: HTTPS
+    hostname: api.example.com
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - kind: Secret
+        name: commerce-edge-tls
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: website
+  namespace: commerce-poc
+spec:
+  parentRefs:
+  - name: commerce
+    sectionName: website
+  hostnames:
+  - commerce.example.com
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: "/"
+    backendRefs:
+    - name: website
+      port: 3000
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: app-bff
+  namespace: commerce-poc
+spec:
+  parentRefs:
+  - name: commerce
+    sectionName: app-api
+  hostnames:
+  - api.example.com
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: "/"
+    backendRefs:
+    - name: app-bff
+      port: 3002
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: https-redirect
+  namespace: commerce-poc
+spec:
+  parentRefs:
+  - name: commerce
+    sectionName: http
+  hostnames:
+  - commerce.example.com
+  - api.example.com
+  rules:
+  - filters:
+    - type: RequestRedirect
+      requestRedirect:
+        scheme: https
+        statusCode: 301
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: app-bff-tls
+  namespace: commerce-poc
+spec:
+  targetRefs:
+  - group: ''
+    kind: Service
+    name: app-bff
+  validation:
+    hostname: app-bff
+    caCertificateRefs:
+    - group: ''
+      kind: ConfigMap
+      name: commerce-service-ca

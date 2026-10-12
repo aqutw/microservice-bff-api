@@ -21,14 +21,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
+      COMPOSE_FILE: docker-compose.yml:docker-compose.dev.yml
+      COMPOSE_ENV_FILES: .env.security
       COMPOSE_PROJECT_NAME: poc-sit-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Generate isolated local identity credentials
+        run: node scripts/init-security.mjs
       - name: Build and start real services
         run: |
           mkdir -p artifacts/sit
           set -o pipefail
           docker compose up --build -d 2>&1 | tee artifacts/sit/build.log
+      - name: Run identity and access integration tests
+        run: NODE_EXTRA_CA_CERTS="$PWD/.security/pki/ca.pem" node scripts/security-sit.mjs
       - name: Run system integration tests
         run: |
           set -o pipefail

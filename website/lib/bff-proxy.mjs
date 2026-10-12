@@ -1,7 +1,8 @@
 import { authSettings, readSession, validMutation } from './auth.mjs';
 export async function proxyRequest(request, segments) {
-  const base = process.env.BFF_URL || 'http://localhost:3001';
+  const base = process.env.BFF_URL || 'https://localhost:3001';
   const target = new URL(`/api/${segments.map(encodeURIComponent).join('/')}`, base);
+  if (target.protocol !== 'https:') return Response.json({error:'bff_https_required'}, {status:503});
   target.search = new URL(request.url).search;
   const headers = new Headers();
   for (const name of ['content-type', 'idempotency-key', 'x-correlation-id']) {
@@ -16,7 +17,7 @@ export async function proxyRequest(request, segments) {
       headers.set('authorization', `Bearer ${session.accessToken}`);
     }
     const upstream = await fetch(target, {
-      method: request.method, headers, cache: 'no-store',
+      method: request.method, headers, redirect: 'error', cache: 'no-store',
       body: ['GET', 'HEAD'].includes(request.method) ? undefined : request.body,
       duplex: 'half',
       signal: AbortSignal.any([request.signal, AbortSignal.timeout(10000)])
@@ -26,6 +27,7 @@ export async function proxyRequest(request, segments) {
       headers: { 'content-type': upstream.headers.get('content-type') || 'application/json', 'cache-control': 'no-store' }
     });
   } catch (error) {
+    if (error.status === 503) return Response.json({error:'session_store_unavailable'}, {status:503});
     const timedOut = error.name === 'TimeoutError';
     return Response.json({ error: timedOut ? 'bff_timeout' : 'bff_unavailable' }, { status: timedOut ? 504 : 502 });
   }

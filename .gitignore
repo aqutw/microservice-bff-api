@@ -7,3 +7,5 @@ services/*/data/
 *.db-wal
 dist/
 artifacts/
+.security/
+.env.security*

@@ -1,57 +1,149 @@
 services:
   audit-worker:
-    build: ./services/audit-worker
-    ports: ["8084:8084"]
-    volumes: [audit-data:/data]
+    build:
+      context: ./services
+      dockerfile: audit-worker/Dockerfile
+    environment:
+      SERVICE_TLS_CERT: /run/tls/tls.crt
+      SERVICE_TLS_KEY: /run/tls/tls.key
+      SERVICE_CA_FILE: /run/tls/ca.crt
+      NODE_EXTRA_CA_CERTS: /run/tls/ca.crt
+      SERVICE_NAME: audit-worker
+      SERVICE_INCOMING_KEYS: ${AUDIT_WORKER_INCOMING_KEYS:?Run scripts/init-security.mjs or configure service keys}
+      SERVICE_OUTGOING_KEYS: ${AUDIT_WORKER_OUTGOING_KEYS:?Configure service keys}
+    volumes:
+      - audit-data:/data
+      - ${SERVICE_PKI_DIR:?Configure service PKI directory}/audit-worker.pem:/run/tls/tls.crt:ro
+      - ${SERVICE_PKI_DIR}/audit-worker.key:/run/tls/tls.key:ro
+      - ${SERVICE_PKI_DIR}/ca.pem:/run/tls/ca.crt:ro
   inventory:
-    build: ./services/inventory
+    build:
+      context: ./services
+      dockerfile: inventory/Dockerfile
     environment:
-      AUDIT_WORKER_URL: http://audit-worker:8084
-    ports: ["8082:8082"]
-    volumes: [inventory-data:/data]
+      SERVICE_TLS_CERT: /run/tls/tls.crt
+      SERVICE_TLS_KEY: /run/tls/tls.key
+      SERVICE_CA_FILE: /run/tls/ca.crt
+      NODE_EXTRA_CA_CERTS: /run/tls/ca.crt
+      SERVICE_NAME: inventory
+      SERVICE_INCOMING_KEYS: ${INVENTORY_INCOMING_KEYS:?Configure service keys}
+      SERVICE_OUTGOING_KEYS: ${INVENTORY_OUTGOING_KEYS:?Configure service keys}
+      AUDIT_WORKER_URL: https://audit-worker:8084
+    volumes:
+      - inventory-data:/data
+      - ${SERVICE_PKI_DIR:?Configure service PKI directory}/inventory.pem:/run/tls/tls.crt:ro
+      - ${SERVICE_PKI_DIR}/inventory.key:/run/tls/tls.key:ro
+      - ${SERVICE_PKI_DIR}/ca.pem:/run/tls/ca.crt:ro
   order:
-    build: ./services/order
+    build:
+      context: ./services
+      dockerfile: order/Dockerfile
     environment:
-      AUDIT_WORKER_URL: http://audit-worker:8084
-      INVENTORY_API_URL: http://inventory:8082
-      PAYMENT_API_URL: http://payment:8083
-    ports: ["8081:8081"]
-    volumes: [order-data:/data]
+      SERVICE_TLS_CERT: /run/tls/tls.crt
+      SERVICE_TLS_KEY: /run/tls/tls.key
+      SERVICE_CA_FILE: /run/tls/ca.crt
+      NODE_EXTRA_CA_CERTS: /run/tls/ca.crt
+      SERVICE_NAME: order
+      SERVICE_INCOMING_KEYS: ${ORDER_INCOMING_KEYS:?Configure service keys}
+      SERVICE_OUTGOING_KEYS: ${ORDER_OUTGOING_KEYS:?Configure service keys}
+      AUDIT_WORKER_URL: https://audit-worker:8084
+      INVENTORY_API_URL: https://inventory:8082
+      PAYMENT_API_URL: https://payment:8083
+    volumes:
+      - order-data:/data
+      - ${SERVICE_PKI_DIR:?Configure service PKI directory}/order.pem:/run/tls/tls.crt:ro
+      - ${SERVICE_PKI_DIR}/order.key:/run/tls/tls.key:ro
+      - ${SERVICE_PKI_DIR}/ca.pem:/run/tls/ca.crt:ro
   payment:
-    build: ./services/payment
+    build:
+      context: ./services
+      dockerfile: payment/Dockerfile
     environment:
-      AUDIT_WORKER_URL: http://audit-worker:8084
-    ports: ["8083:8083"]
-    volumes: [payment-data:/data]
+      SERVICE_TLS_CERT: /run/tls/tls.crt
+      SERVICE_TLS_KEY: /run/tls/tls.key
+      SERVICE_CA_FILE: /run/tls/ca.crt
+      NODE_EXTRA_CA_CERTS: /run/tls/ca.crt
+      SERVICE_NAME: payment
+      SERVICE_INCOMING_KEYS: ${PAYMENT_INCOMING_KEYS:?Configure service keys}
+      SERVICE_OUTGOING_KEYS: ${PAYMENT_OUTGOING_KEYS:?Configure service keys}
+      ORDER_API_URL: https://order:8081
+      AUDIT_WORKER_URL: https://audit-worker:8084
+    volumes:
+      - payment-data:/data
+      - ${SERVICE_PKI_DIR:?Configure service PKI directory}/payment.pem:/run/tls/tls.crt:ro
+      - ${SERVICE_PKI_DIR}/payment.key:/run/tls/tls.key:ro
+      - ${SERVICE_PKI_DIR}/ca.pem:/run/tls/ca.crt:ro
   desktop-bff:
     build: ./bff-api
     command: ["node", "src/desktop.js"]
     environment:
-      ORDER_API_URL: http://order:8081
-      INVENTORY_API_URL: http://inventory:8082
-      PAYMENT_API_URL: http://payment:8083
-      AUDIT_API_URL: http://audit-worker:8084
+      SERVICE_TLS_CERT: /run/tls/tls.crt
+      SERVICE_TLS_KEY: /run/tls/tls.key
+      SERVICE_CA_FILE: /run/tls/ca.crt
+      NODE_EXTRA_CA_CERTS: /run/tls/ca.crt
+      SERVICE_NAME: desktop-bff
+      SERVICE_OUTGOING_KEYS: ${DESKTOP_BFF_OUTGOING_KEYS:?Configure service keys}
+      AUTH_ISSUER: ${AUTH_ISSUER:?Configure an OIDC issuer}
+      AUTH_AUDIENCE: ${AUTH_AUDIENCE:?Configure API audience}
+      AUTH_JWKS_URL: ${AUTH_JWKS_URL:?Configure JWKS URL}
+      AUTH_ALGORITHMS: ${AUTH_ALGORITHMS:-RS256}
+      ALLOWED_ORIGINS: ${PUBLIC_URL:?Configure public URL}
+      ORDER_API_URL: https://order:8081
+      INVENTORY_API_URL: https://inventory:8082
+      PAYMENT_API_URL: https://payment:8083
+      AUDIT_API_URL: https://audit-worker:8084
       PORT: "3001"
-    ports: ["3001:3001"]
+    volumes:
+      - ${SERVICE_PKI_DIR:?Configure service PKI directory}/desktop-bff.pem:/run/tls/tls.crt:ro
+      - ${SERVICE_PKI_DIR}/desktop-bff.key:/run/tls/tls.key:ro
+      - ${SERVICE_PKI_DIR}/ca.pem:/run/tls/ca.crt:ro
+    ports: ["127.0.0.1:${DESKTOP_PORT:-3001}:3001"]
     depends_on: [order, inventory, payment, audit-worker]
   app-bff:
     build: ./bff-api
     command: ["node", "src/app.js"]
     environment:
-      ORDER_API_URL: http://order:8081
-      INVENTORY_API_URL: http://inventory:8082
-      PAYMENT_API_URL: http://payment:8083
-      AUDIT_API_URL: http://audit-worker:8084
+      SERVICE_TLS_CERT: /run/tls/tls.crt
+      SERVICE_TLS_KEY: /run/tls/tls.key
+      SERVICE_CA_FILE: /run/tls/ca.crt
+      NODE_EXTRA_CA_CERTS: /run/tls/ca.crt
+      SERVICE_NAME: app-bff
+      SERVICE_OUTGOING_KEYS: ${APP_BFF_OUTGOING_KEYS:?Configure service keys}
+      AUTH_ISSUER: ${AUTH_ISSUER:?Configure an OIDC issuer}
+      AUTH_AUDIENCE: ${AUTH_AUDIENCE:?Configure API audience}
+      AUTH_JWKS_URL: ${AUTH_JWKS_URL:?Configure JWKS URL}
+      AUTH_ALGORITHMS: ${AUTH_ALGORITHMS:-RS256}
+      ALLOWED_ORIGINS: ${PUBLIC_URL:?Configure public URL}
+      ORDER_API_URL: https://order:8081
+      INVENTORY_API_URL: https://inventory:8082
+      PAYMENT_API_URL: https://payment:8083
+      AUDIT_API_URL: https://audit-worker:8084
       PORT: "3002"
-    ports: ["3002:3002"]
+    volumes:
+      - ${SERVICE_PKI_DIR:?Configure service PKI directory}/app-bff.pem:/run/tls/tls.crt:ro
+      - ${SERVICE_PKI_DIR}/app-bff.key:/run/tls/tls.key:ro
+      - ${SERVICE_PKI_DIR}/ca.pem:/run/tls/ca.crt:ro
+    ports: ["127.0.0.1:${APP_PORT:-3002}:3002"]
     depends_on: [order, inventory, payment, audit-worker]
   website:
     build: ./website
     environment:
-      BFF_URL: http://desktop-bff:3001
-    ports: ["3000:3000"]
+      NODE_EXTRA_CA_CERTS: /run/tls/ca.crt
+      SESSION_STORE_DIR: /data/sessions
+      BFF_URL: https://desktop-bff:3001
+      PUBLIC_URL: ${PUBLIC_URL:?Configure public URL}
+      AUTH_ISSUER: ${AUTH_ISSUER:?Configure an OIDC issuer}
+      AUTH_AUDIENCE: ${AUTH_AUDIENCE:?Configure API audience}
+      AUTH_JWKS_URL: ${AUTH_JWKS_URL:?Configure JWKS URL}
+      AUTH_ALGORITHMS: ${AUTH_ALGORITHMS:-RS256}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:?Configure OIDC client}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?Configure OIDC client secret}
+      SESSION_SECRET: ${SESSION_SECRET:?Configure session encryption key}
+    ports: ["127.0.0.1:${WEBSITE_PORT:-3000}:3000"]
+    volumes: ["${SERVICE_PKI_DIR:?Configure service PKI directory}/ca.pem:/run/tls/ca.crt:ro", "website-sessions:/data"]
     depends_on: [desktop-bff]
 volumes:
+  website-sessions:
   audit-data:
   inventory-data:
   order-data:

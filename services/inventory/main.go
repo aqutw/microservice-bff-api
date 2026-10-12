@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"poc/security"
 	"strconv"
 	"strings"
 	"time"
@@ -45,8 +46,14 @@ type auditEvent struct {
 }
 
 var db *sql.DB
+var serviceAuth *security.Auth
 
 func main() {
+	var authErr error
+	serviceAuth, authErr = security.Load("inventory")
+	if authErr != nil {
+		log.Fatal(authErr)
+	}
 	path := getenv("DB_PATH", "./data/inventory.db")
 	if err := os.MkdirAll(strings.TrimSuffix(path, "/"+filepathBase(path)), 0755); err != nil && !os.IsExist(err) {
 		log.Fatal(err)
@@ -59,7 +66,10 @@ func main() {
 	if err = initDB(); err != nil {
 		log.Fatal(err)
 	}
-	go auditRelay(getenv("AUDIT_WORKER_URL", "http://localhost:8084"))
+	if err = serviceAuth.UseReplayStore(db); err != nil {
+		log.Fatal(err)
+	}
+	go auditRelay(getenv("AUDIT_WORKER_URL", "https://localhost:8084"))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", health)
 	mux.HandleFunc("/v1/audit/events", auditEvents)
@@ -68,7 +78,7 @@ func main() {
 	mux.HandleFunc("/v1/reservations/", reservationAction)
 	addr := ":" + getenv("PORT", "8082")
 	log.Printf("inventory listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, logging(mux)))
+	log.Fatal(serviceAuth.Listen(addr, logging(mux)))
 }
 
 func filepathBase(path string) string {
@@ -356,7 +366,7 @@ func auditRelay(workerURL string) {
 			payload, _ := json.Marshal(event)
 			request, _ := http.NewRequest(http.MethodPost, strings.TrimRight(workerURL, "/")+"/v1/audit/events", bytes.NewReader(payload))
 			request.Header.Set("Content-Type", "application/json")
-			response, postErr := client.Do(request)
+			response, postErr := serviceAuth.Do(client, "audit-worker", request)
 			if postErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
 				response.Body.Close()
 				_, _ = db.Exec("UPDATE audit_outbox SET published_at=?,last_error=NULL WHERE event_id=?", time.Now().UTC().Format(time.RFC3339Nano), event.EventID)

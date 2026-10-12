@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"poc/security"
 	"strconv"
 	"strings"
 	"time"
@@ -46,8 +47,14 @@ type auditEvent struct {
 }
 
 var db *sql.DB
+var serviceAuth *security.Auth
 
 func main() {
+	var authErr error
+	serviceAuth, authErr = security.Load("payment")
+	if authErr != nil {
+		log.Fatal(authErr)
+	}
 	path := env("DB_PATH", "./data/payment.db")
 	if dir := strings.TrimSuffix(path, "/"+base(path)); dir != "" && dir != path {
 		_ = os.MkdirAll(dir, 0755)
@@ -60,7 +67,10 @@ func main() {
 	if err = initDB(); err != nil {
 		log.Fatal(err)
 	}
-	go auditRelay(env("AUDIT_WORKER_URL", "http://localhost:8084"))
+	if err = serviceAuth.UseReplayStore(db); err != nil {
+		log.Fatal(err)
+	}
+	go auditRelay(env("AUDIT_WORKER_URL", "https://localhost:8084"))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", health)
 	mux.HandleFunc("/v1/audit/events", auditEvents)
@@ -68,7 +78,7 @@ func main() {
 	mux.HandleFunc("/v1/payments/", paymentAction)
 	addr := ":" + env("PORT", "8083")
 	log.Printf("payment listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, logging(mux)))
+	log.Fatal(serviceAuth.Listen(addr, logging(mux)))
 }
 func env(k, f string) string {
 	if v := os.Getenv(k); v != "" {
@@ -154,6 +164,24 @@ func paymentAction(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		write(w, 500, map[string]string{"error": err.Error()})
 		return
+	}
+	if caller := security.Caller(r); caller == "desktop-bff" || caller == "app-bff" {
+		lookup, _ := http.NewRequest(http.MethodGet, strings.TrimRight(env("ORDER_API_URL", "https://localhost:8081"), "/")+"/v1/orders/"+p.OrderID, nil)
+		lookup.Header.Set("X-Actor-ID", r.Header.Get("X-Actor-ID"))
+		owner, lookupErr := serviceAuth.Do(&http.Client{Timeout: 3 * time.Second}, "order", lookup)
+		if lookupErr != nil {
+			write(w, 503, map[string]string{"error": "owner_lookup_unavailable"})
+			return
+		}
+		owner.Body.Close()
+		if owner.StatusCode != 200 {
+			status := owner.StatusCode
+			if status != 404 {
+				status = 503
+			}
+			write(w, status, map[string]string{"error": "payment_not_found"})
+			return
+		}
 	}
 	if r.Method == http.MethodGet && len(parts) == 1 {
 		write(w, 200, p)
@@ -293,7 +321,7 @@ func auditRelay(workerURL string) {
 			payload, _ := json.Marshal(event)
 			request, _ := http.NewRequest(http.MethodPost, strings.TrimRight(workerURL, "/")+"/v1/audit/events", bytes.NewReader(payload))
 			request.Header.Set("Content-Type", "application/json")
-			response, postErr := client.Do(request)
+			response, postErr := serviceAuth.Do(client, "audit-worker", request)
 			if postErr == nil && response.StatusCode >= 200 && response.StatusCode < 300 {
 				response.Body.Close()
 				_, _ = db.Exec("UPDATE audit_outbox SET published_at=?,last_error=NULL WHERE event_id=?", time.Now().UTC().Format(time.RFC3339Nano), event.EventID)
