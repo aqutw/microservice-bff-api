@@ -233,6 +233,20 @@ func reservationAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
+	// Claim the transition before any inventory side effects. The predicate
+	// remains valid even if another request changed the pre-read status.
+	result, err := tx.Exec("UPDATE reservations SET status=? WHERE id=? AND status='reserved'", target, id)
+	if err != nil {
+		_ = tx.Rollback()
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		_ = tx.Rollback()
+		writeJSON(w, 409, map[string]string{"error": "reservation_not_active"})
+		return
+	}
 	if action == "release" {
 		var items []Item
 		_ = json.Unmarshal([]byte(raw), &items)
@@ -243,15 +257,6 @@ func reservationAction(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if _, err = tx.Exec("UPDATE reservations SET status=? WHERE id=?", target, id); err != nil {
-			_ = tx.Rollback()
-			writeJSON(w, 500, map[string]string{"error": err.Error()})
-			return
-		}
-	} else if _, err = tx.Exec("UPDATE reservations SET status=? WHERE id=?", target, id); err != nil {
-		_ = tx.Rollback()
-		writeJSON(w, 500, map[string]string{"error": err.Error()})
-		return
 	}
 	eventType := map[string]string{"release": "inventory.released", "commit": "inventory.committed"}[action]
 	if err = recordAuditTx(tx, r, eventType, "reservation", id, action, "success", map[string]any{"status": "reserved"}, map[string]any{"status": target}); err != nil {

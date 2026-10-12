@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	_ "modernc.org/sqlite"
 	"net/http/httptest"
 	"path/filepath"
@@ -95,6 +96,55 @@ func TestConcurrentReservationsNeverOversell(t *testing.T) {
 	_ = db.QueryRow("SELECT available FROM stock WHERE sku='mug'").Scan(&available)
 	if success != 20 || available != 0 {
 		t.Fatalf("success=%d available=%d", success, available)
+	}
+}
+
+func TestConcurrentReservationTransitionsHaveOneWinner(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("mixed=%v", mixed), func(t *testing.T) {
+			setupInventoryTestDB(t)
+			createdResponse := httptest.NewRecorder()
+			reservations(createdResponse, httptest.NewRequest("POST", "/v1/reservations", strings.NewReader(`{"order_id":"race","items":[{"sku":"mug","quantity":1}]}`)))
+			var created reservation
+			_ = json.Unmarshal(createdResponse.Body.Bytes(), &created)
+			var wg sync.WaitGroup
+			codes := make(chan int, 32)
+			for i := 0; i < 32; i++ {
+				action := "release"
+				if mixed && i%2 == 0 {
+					action = "commit"
+				}
+				wg.Add(1)
+				go func(action string) {
+					defer wg.Done()
+					response := httptest.NewRecorder()
+					reservationAction(response, httptest.NewRequest("POST", "/v1/reservations/"+created.ID+"/"+action, nil))
+					codes <- response.Code
+				}(action)
+			}
+			wg.Wait()
+			close(codes)
+			success := 0
+			for code := range codes {
+				if code == 200 {
+					success++
+				} else if code != 409 {
+					t.Fatalf("status=%d", code)
+				}
+			}
+			var available, events int
+			var status string
+			_ = db.QueryRow("SELECT available FROM stock WHERE sku='mug'").Scan(&available)
+			_ = db.QueryRow("SELECT status FROM reservations WHERE id=?", created.ID).Scan(&status)
+			_ = db.QueryRow("SELECT COUNT(*) FROM audit_outbox WHERE aggregate_id=?", created.ID).Scan(&events)
+			want := 19
+			if status == "released" {
+				want = 20
+			}
+			if success != 1 || available != want || events != 2 {
+				t.Fatalf("success=%d available=%d status=%s events=%d", success, available, status, events)
+			}
+		})
 	}
 }
 
