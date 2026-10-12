@@ -31,14 +31,22 @@ jobs:
           docker compose up --build -d 2>&1 | tee artifacts/loadtest/build.log
       - name: Wait for service health
         run: |
-          for port in 8081 8082 8083 8084 3001 3002; do
+          wait_http() {
+            local url=$1 max_time=${2:-3}
             for attempt in {1..60}; do
-              if curl --fail --silent --max-time 3 "http://127.0.0.1:${port}/healthz" >/dev/null; then break; fi
-              if [ "$attempt" = 60 ]; then exit 1; fi
-              sleep 1
+              if curl --fail --silent --show-error --max-time "$max_time" "$url" >/dev/null; then
+                echo "Ready: $url"
+                return 0
+              fi
+              if [ "$attempt" != 60 ]; then sleep 1; fi
             done
+            echo "::error::Service did not become ready: $url" >&2
+            return 1
+          }
+          for port in 8081 8082 8083 8084 3001 3002; do
+            wait_http "http://127.0.0.1:${port}/healthz"
           done
-          curl --fail --silent --max-time 10 http://127.0.0.1:3000/audit >/dev/null
+          wait_http http://127.0.0.1:3000/audit 10
       - name: Run k6 scenarios
         run: |
           docker run --rm --network host \
