@@ -1,3 +1,5 @@
+import { apiError, readBody, request } from './http.js';
+
 const defaults = {
   order: process.env.ORDER_API_URL || 'http://localhost:8081',
   inventory: process.env.INVENTORY_API_URL || 'http://localhost:8082',
@@ -11,23 +13,13 @@ const catalog = [
   { sku: 'mug', name: '霧黑陶杯', unitPriceCents: 650, available: 20 }
 ];
 
-async function request(base, path, options = {}) {
-  const response = await fetch(`${base}${path}`, {
-    ...options,
-    headers: { 'content-type': 'application/json', ...(options.headers || {}) }
-  });
-  const text = await response.text();
-  let body; try { body = text ? JSON.parse(text) : {}; } catch { body = { error: text }; }
-  if (!response.ok) { const error = new Error(body.error || `upstream_${response.status}`); error.status = response.status; error.body = body; throw error; }
-  return body;
-}
-
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' }); res.end(JSON.stringify(body)); }
-function readBody(req) { return new Promise((resolve, reject) => { let raw = ''; req.on('data', c => { raw += c; if (raw.length > 1024 * 1024) reject(new Error('payload_too_large')); }); req.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { reject(new Error('invalid_json')); } }); req.on('error', reject); }); }
 function urlPath(req) { return new URL(req.url, 'http://localhost').pathname; }
 
 export async function checkout(input, variant, services = defaults, context = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw apiError('invalid_request', 400);
   const userId = input.user_id || input.userId || 'demo-user';
+  if (typeof userId !== 'string' || userId.length > 128) throw apiError('invalid_user_id', 400);
   const items = Array.isArray(input.items) ? input.items : [];
   if (!items.length) { const e = new Error('items_required'); e.status = 400; throw e; }
   const normalized = items.map(item => {
@@ -61,9 +53,9 @@ export async function checkout(input, variant, services = defaults, context = {}
 
 export function createServer(variant, services = defaults) {
   return async (req, res) => {
-    const path = urlPath(req);
     const context = { 'x-actor-id': req.headers['x-actor-id'] || 'bff-anonymous', 'x-correlation-id': req.headers['x-correlation-id'] || req.headers['x-request-id'] || `corr_${Date.now()}` };
     try {
+      const path = urlPath(req);
       if (req.method === 'OPTIONS') { res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,OPTIONS', 'access-control-allow-headers': 'content-type,authorization' }); return res.end(); }
       if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok', service: `${variant}-bff` });
       if (req.method === 'GET' && path === '/api/catalog') return json(res, 200, { products: catalog });
