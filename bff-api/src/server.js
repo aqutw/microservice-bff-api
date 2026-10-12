@@ -30,9 +30,13 @@ export async function checkout(input, variant, services = defaults, context = {}
   const userId = input.user_id || input.userId || 'demo-user';
   const items = Array.isArray(input.items) ? input.items : [];
   if (!items.length) { const e = new Error('items_required'); e.status = 400; throw e; }
-  const normalized = items.map(item => ({ sku: String(item.sku), quantity: Number(item.quantity), unitPriceCents: Number(item.unit_price_cents ?? item.unitPriceCents ?? catalog.find(p => p.sku === item.sku)?.unitPriceCents ?? 0) }));
-  if (normalized.some(item => !item.sku || !Number.isInteger(item.quantity) || item.quantity < 1 || !Number.isInteger(item.unitPriceCents) || item.unitPriceCents < 0)) { const e = new Error('invalid_items'); e.status = 400; throw e; }
+  const normalized = items.map(item => {
+    const product = catalog.find(product => product.sku === item?.sku);
+    if (!product || !Number.isSafeInteger(item.quantity) || item.quantity < 1) { const e = new Error('invalid_items'); e.status = 400; throw e; }
+    return { sku: product.sku, quantity: item.quantity, unitPriceCents: product.unitPriceCents };
+  });
   const totalCents = normalized.reduce((sum, item) => sum + item.quantity * item.unitPriceCents, 0);
+  if (!Number.isSafeInteger(totalCents)) { const e = new Error('invalid_total'); e.status = 400; throw e; }
   const channel = variant === 'app' ? 'app' : 'web';
   const order = await request(services.order, '/v1/orders', { method: 'POST', headers: context, body: JSON.stringify({ user_id: userId, items: normalized.map(({ sku, quantity }) => ({ sku, quantity })), total_cents: totalCents, currency: 'TWD' }) });
   let reservation;

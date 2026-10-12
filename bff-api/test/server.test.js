@@ -71,3 +71,25 @@ test('audit API failure is isolated from checkout', async () => {
   const checkoutResult = await checkout({ user_id: 'user-3', items: [{ sku: 'mug', quantity: 1, unit_price_cents: 650 }] }, 'desktop', { order: 'http://order', inventory: 'http://inventory', payment: 'http://payment', audit: 'http://audit:8084' });
   assert.equal(checkoutResult.order.id, 'ord-3');
 });
+
+test('server catalog controls prices regardless of client-supplied amounts', async () => {
+  const payments = [];
+  globalThis.fetch = async (url, options = {}) => {
+    if (url.endsWith('/v1/orders')) return response({ id: 'priced', status: 'pending_payment' }, 201);
+    if (url.endsWith('/v1/reservations')) return response({ reservation_id: 'reserved', status: 'reserved' }, 201);
+    payments.push(JSON.parse(options.body));
+    return response({ id: 'pay', checkout_url: 'demo' }, 201);
+  };
+  for (const price of [0, -1, 1, 999999]) {
+    const result = await checkout({ items: [{ sku: 'mug', quantity: 2, unit_price_cents: price }] }, 'desktop');
+    assert.equal(result.order.total.cents, 1300);
+  }
+  assert.ok(payments.every(payment => payment.amount_cents === 1300));
+});
+
+test('invalid SKUs, quantities, and overflowing totals never create an order', async () => {
+  globalThis.fetch = async () => { assert.fail('invalid input reached upstream'); };
+  for (const item of [null, { sku: 'missing', quantity: 1 }, { sku: 'mug', quantity: '1' }, { sku: 'mug', quantity: 0 }, { sku: 'mug', quantity: 1.5 }, { sku: 'mug', quantity: Number.MAX_SAFE_INTEGER }]) {
+    await assert.rejects(checkout({ items: [item] }, 'desktop'), error => error.status === 400);
+  }
+});
