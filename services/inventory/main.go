@@ -133,23 +133,42 @@ func reservations(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request"})
 		return
 	}
+	// Merge duplicate SKUs before deduction and reject overflowing quantities.
+	merged := make([]Item, 0, len(req.Items))
+	positions := map[string]int{}
+	for _, item := range req.Items {
+		if item.SKU == "" || item.Quantity < 1 {
+			writeJSON(w, 400, map[string]string{"error": "invalid_items"})
+			return
+		}
+		if i, exists := positions[item.SKU]; exists {
+			if merged[i].Quantity > int(^uint(0)>>1)-item.Quantity {
+				writeJSON(w, 400, map[string]string{"error": "invalid_items"})
+				return
+			}
+			merged[i].Quantity += item.Quantity
+		} else {
+			positions[item.SKU] = len(merged)
+			merged = append(merged, item)
+		}
+	}
+	req.Items = merged
 	tx, err := db.Begin()
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 	for _, item := range req.Items {
-		var available int
-		if err := tx.QueryRow("SELECT available FROM stock WHERE sku = ?", item.SKU).Scan(&available); err != nil || item.Quantity < 1 || available < item.Quantity {
+		result, updateErr := tx.Exec("UPDATE stock SET available = available - ? WHERE sku = ? AND available >= ?", item.Quantity, item.SKU, item.Quantity)
+		if updateErr != nil {
 			_ = tx.Rollback()
-			writeJSON(w, 409, map[string]string{"error": "insufficient_stock", "sku": item.SKU})
+			writeJSON(w, 500, map[string]string{"error": updateErr.Error()})
 			return
 		}
-	}
-	for _, item := range req.Items {
-		if _, err = tx.Exec("UPDATE stock SET available = available - ? WHERE sku = ?", item.Quantity, item.SKU); err != nil {
+		changed, rowsErr := result.RowsAffected()
+		if rowsErr != nil || changed != 1 {
 			_ = tx.Rollback()
-			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			writeJSON(w, 409, map[string]string{"error": "insufficient_stock", "sku": item.SKU})
 			return
 		}
 	}
