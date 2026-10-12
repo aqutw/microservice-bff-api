@@ -1,6 +1,6 @@
 module poc/order
 
-go 1.22
+go 1.27.0
 
 require modernc.org/sqlite v1.29.8
 

@@ -5,7 +5,7 @@
 依照 `_/訂單服務 庫存 金流紀錄，用3個微服務實現嗎？.md` 與 `_/web與app; go與nodejs.md`，這個 PoC 將前端通道與核心領域拆開：
 
 - `website/`：Next.js storefront，預設呼叫 desktop BFF。
-- `bff-api/`：Node.js 20，`desktop.js` 在 3001、`app.js` 在 3002；兩者共用編排邏輯，但回傳給 Web／App 的資料形狀不同。
+- `bff-api/`：Node.js 22，`desktop.js` 在 3001、`app.js` 在 3002；兩者共用編排邏輯，但回傳給 Web／App 的資料形狀不同。
 - `services/order/`：Go＋SQLite，建立訂單與狀態流轉。
 - `services/inventory/`：Go＋SQLite，預扣、釋放、提交庫存。
 - `services/payment/`：Go＋SQLite，建立待付款交易與 demo confirm。
@@ -38,7 +38,10 @@ cd bff-api && PORT=3002 npm run app
 
 ## Local run
 
-需要 Go 1.22，建議使用 Node.js 22（網站最低要求 Node.js 20.9）。BFF 不依賴第三方 npm 套件；網站使用 Next.js 16 與 React 19，Docker 與網站 CI 採用 Node.js 22，並透過 `package-lock.json`／`npm ci` 固定依賴。
+Go images and CI use Go 1.27.2; service modules require Go 1.27. Node.js BFF,
+website images and CI use the supported Node.js 22 LTS line.
+
+需要 Go 1.27，使用 Node.js 22（BFF 與網站皆要求 Node.js 22 或更新版本）。BFF 不依賴第三方 npm 套件；網站使用 Next.js 16 與 React 19，Docker 與網站 CI 採用 Node.js 22，並透過 `package-lock.json`／`npm ci` 固定依賴。
 
 ```bash
 cd services/order && go mod download && go run .

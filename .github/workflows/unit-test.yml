@@ -20,11 +20,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.27.2'
           cache: false
       - name: Test ${{ matrix.service }}
         working-directory: services/${{ matrix.service }}
-        run: go test ./...
+        run: go test -race ./...
 
   bff-contract-test:
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'loadtest-')
@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       - run: npm install --ignore-scripts
       - run: npm test
       - run: node --test ../loadtest/commerce.test.mjs
