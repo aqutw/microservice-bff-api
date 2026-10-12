@@ -1,0 +1,225 @@
+# Commerce microservices PoC
+
+依照 `_/訂單服務 庫存 金流紀錄，用3個微服務實現嗎？.md` 與 `_/web與app; go與nodejs.md`，這個 PoC 將前端通道與核心領域拆開：
+
+- `website/`：Next.js storefront，預設呼叫 desktop BFF。
+- `bff-api/`：Node.js 20，`desktop.js` 在 3001、`app.js` 在 3002；兩者共用編排邏輯，但回傳給 Web／App 的資料形狀不同。
+- `services/order/`：Go＋SQLite，建立訂單與狀態流轉。
+- `services/inventory/`：Go＋SQLite，預扣、釋放、提交庫存。
+- `services/payment/`：Go＋SQLite，建立待付款交易與 demo confirm。
+- `services/audit-worker/`：Go＋SQLite，接收各服務背景轉送的 audit events，提供集中 Audit Store 與 Audit API。
+
+結帳流程是本地交易串接：先建待付款訂單，再預扣庫存，再建立金流；後續步驟失敗會取消訂單並釋放庫存，呈現 Saga 補償的 PoC。每個 Go service 會在同一個 SQLite transaction 寫入業務資料與 `audit_outbox`，背景 relay 非同步送到 audit-worker；因此 Audit Worker 或 Audit API 暫時故障時，不會卡住 checkout。SQLite 每個服務獨立持有，正式環境可替換為 PostgreSQL 與 message broker。
+
+## Web／App BFF
+
+PoC 已提供兩個獨立的 Node.js BFF API，兩者共用核心編排邏輯，但依前端型態回傳不同資料格式：
+
+| 用途 | 啟動檔案 | Port | Checkout API | 主要支付回傳 |
+| --- | --- | ---: | --- | --- |
+| Web／Desktop | `bff-api/src/desktop.js` | `3001` | `POST /api/checkout` | `redirectUrl` |
+| App | `bff-api/src/app.js` | `3002` | `POST /api/checkout` | `clientToken` |
+
+對應關係如下：
+
+```text
+Next.js Website → Desktop BFF :3001 → Order／Inventory／Payment
+Mobile App      → App BFF     :3002 → Order／Inventory／Payment
+```
+
+啟動方式：
+
+```bash
+cd bff-api && npm run desktop
+cd bff-api && PORT=3002 npm run app
+```
+
+## Local run
+
+需要 Go 1.22、Node.js 20+。BFF 不依賴第三方 npm 套件；網站需要安裝 Next.js 依賴。
+
+```bash
+cd services/order && go mod download && go run .
+cd services/inventory && go mod download && go run .
+cd services/payment && go mod download && go run .
+cd services/audit-worker && go mod download && go run .
+cd bff-api && npm run desktop
+cd bff-api && PORT=3002 npm run app
+cd website && npm install && NEXT_PUBLIC_BFF_URL=http://localhost:3001 npm run dev
+```
+
+也可一次啟動完整環境：
+
+```bash
+docker compose up --build
+```
+
+網站為 http://localhost:3000，desktop BFF 為 http://localhost:3001，app BFF 為 http://localhost:3002，audit-worker 為 http://localhost:8084。App checkout 範例：
+
+```bash
+curl -X POST http://localhost:3002/api/checkout \
+  -H 'content-type: application/json' \
+  -d '{"user_id":"app-user","items":[{"sku":"mug","quantity":1,"unit_price_cents":650}]}'
+```
+
+取得 payment id 後可呼叫 `POST /api/payments/{id}/confirm`，BFF 會同步把訂單狀態更新為 `paid`。
+
+Audit events 由三個 Go service 寫入各自的 `audit_outbox`，背景 relay 送至 audit-worker 的 Audit Store，再由 Node.js BFF 讀取：
+
+```text
+Go service audit_outbox → background relay → audit-worker Audit Store
+GET http://localhost:3001/api/audit/events
+```
+
+Audit Worker API 為 `GET http://localhost:8084/v1/audit/events`；Node.js BFF 的 `GET /api/audit/events` 會轉送 query filters。Next.js audit dashboard 位於 http://localhost:3000/audit。BFF 支援 `service`、`event_type`、`aggregate_id`、`actor_id`、`correlation_id` 與 `limit` query filters，例如 `GET /api/audit/events?service=payment&limit=20`。
+
+## Verify runbook
+
+以下步驟使用 Docker Compose，會驗證服務健康狀態、Desktop／App BFF checkout、付款確認，以及庫存不足時的 Saga 補償。需要 `curl` 與 `jq`。
+
+### 1. 啟動 PoC
+
+```bash
+docker compose up --build -d
+docker compose ps
+```
+
+等待七個 HTTP container 顯示 `running` 後再繼續。若要查看啟動錯誤：
+
+```bash
+docker compose logs --tail=100 audit-worker order inventory payment desktop-bff app-bff website
+```
+
+### 2. 驗證 health endpoints
+
+```bash
+for url in \
+  http://localhost:8081/healthz \
+  http://localhost:8082/healthz \
+  http://localhost:8083/healthz \
+  http://localhost:8084/healthz \
+  http://localhost:3001/healthz \
+  http://localhost:3002/healthz; do
+  curl --fail --silent "$url" | jq .
+done
+
+curl --fail --silent --head http://localhost:3000
+```
+
+每個 API 應回傳 `{"status":"ok"...}`；website 應回傳 HTTP 200。
+
+### 3. 驗證 Desktop checkout 與付款確認
+
+先記錄庫存，再透過 Desktop BFF 建立訂單：
+
+```bash
+before=$(curl --fail --silent http://localhost:8082/v1/stock/mug | jq -r .available)
+desktop_response=$(curl --fail --silent --request POST http://localhost:3001/api/checkout \
+  --header 'content-type: application/json' \
+  --data '{"user_id":"verify-desktop","items":[{"sku":"mug","quantity":1,"unit_price_cents":650}]}')
+echo "$desktop_response" | jq .
+
+order_id=$(echo "$desktop_response" | jq -r .order.id)
+payment_id=$(echo "$desktop_response" | jq -r .payment.id)
+reservation_id=$(echo "$desktop_response" | jq -r .inventory.reservationId)
+test "$order_id" != "null" && test "$payment_id" != "null" && test "$reservation_id" != "null"
+```
+
+確認付款後，訂單應變成 `paid`，庫存預扣量應減少一件：
+
+```bash
+curl --fail --silent --request POST "http://localhost:3001/api/payments/$payment_id/confirm" | jq .
+curl --fail --silent "http://localhost:3001/api/orders/$order_id" | jq '{id,status,total_cents}'
+after=$(curl --fail --silent http://localhost:8082/v1/stock/mug | jq -r .available)
+test "$after" -eq "$((before - 1))"
+```
+
+PoC 的 `confirm` 會完成付款與訂單狀態更新；若要把已預扣的 reservation 標記為最終提交，執行：
+
+```bash
+curl --fail --silent --request POST "http://localhost:8082/v1/reservations/$reservation_id/commit" | jq .
+curl --fail --silent "http://localhost:8082/v1/reservations/$reservation_id" | jq .
+```
+
+最後一個回應的 `status` 應為 `committed`。
+
+### 4. 驗證 App BFF 的資料形狀
+
+App BFF 使用相同的核心流程，但回傳 `clientToken` 與 App 專用欄位：
+
+```bash
+app_response=$(curl --fail --silent --request POST http://localhost:3002/api/checkout \
+  --header 'content-type: application/json' \
+  --data '{"user_id":"verify-app","items":[{"sku":"tea-leaves","quantity":1,"unit_price_cents":280}]}')
+echo "$app_response" | jq .
+test "$(echo "$app_response" | jq -r .state)" = "awaiting_payment"
+test "$(echo "$app_response" | jq -r .payment.clientToken)" != "null"
+```
+
+### 5. 驗證 Audit API 與 Dashboard
+
+前面的 checkout 與付款步驟會在三個 Go service 的 `audit_outbox` 產生 events，背景 relay 會非同步送到 audit-worker。先等待事件送達，再確認 BFF 能讀取集中 Audit Store：
+
+```bash
+for attempt in {1..10}; do
+  count=$(curl --fail --silent 'http://localhost:3001/api/audit/events?limit=1' | jq -r .count)
+  [ "$count" -gt 0 ] && break
+  sleep 1
+done
+curl --fail --silent 'http://localhost:3001/api/audit/events?limit=20' | jq '{count,services,events: [.events[] | {event_type,service,aggregate_id,status}]}'
+curl --fail --silent 'http://localhost:3001/api/audit/events?service=payment' | jq .
+```
+
+開啟 http://localhost:3000/audit，應看到依時間排序的 order、inventory、payment events；下拉選單可切換單一 service。
+
+### 6. 驗證 Audit Worker 故障不阻塞 checkout
+
+暫停 Audit Worker，checkout 仍應成功；事件會留在各服務的 `audit_outbox`，Worker 恢復後由 relay 重試送出：
+
+```bash
+docker compose stop audit-worker
+curl --fail --silent --request POST http://localhost:3001/api/checkout \
+  --header 'content-type: application/json' \
+  --data '{"user_id":"verify-audit-outage","items":[{"sku":"coffee-beans","quantity":1,"unit_price_cents":420}]}' | jq .
+docker compose start audit-worker
+```
+
+checkout response 應為 HTTP 201；重新查詢 `GET /api/audit/events` 時，事件可能有數秒的最終一致性延遲。
+
+### 7. 驗證 Saga 補償
+
+請求超過可用庫存，應回傳 HTTP 409。BFF 會取消已建立的訂單；庫存數量不應被扣減：
+
+```bash
+before_failure=$(curl --fail --silent http://localhost:8082/v1/stock/mug | jq -r .available)
+status=$(curl --silent --output /tmp/checkout-failure.json --write-out '%{http_code}' \
+  --request POST http://localhost:3001/api/checkout \
+  --header 'content-type: application/json' \
+  --data '{"user_id":"verify-failure","items":[{"sku":"mug","quantity":999,"unit_price_cents":650}]}')
+cat /tmp/checkout-failure.json | jq .
+test "$status" = "409"
+after_failure=$(curl --fail --silent http://localhost:8082/v1/stock/mug | jq -r .available)
+test "$before_failure" -eq "$after_failure"
+```
+
+### 8. 清理環境
+
+```bash
+docker compose down
+```
+
+若要連同 SQLite volumes 一起重置資料：
+
+```bash
+docker compose down -v
+```
+
+## Kubernetes
+
+先建置並推送 manifest 中使用的 `poc/*:dev` images（包含 `poc/audit-worker:dev`，或改成 registry image），再執行：
+
+```bash
+kubectl apply -f k8s/poc.yaml
+```
+
+NodePort：website 30000、desktop BFF 30001、app BFF 30002。audit-worker 僅提供 cluster-internal Service，不直接暴露給瀏覽器。SQLite PVC 只作單副本 PoC；正式環境需要可擴展的資料庫與 secrets／TLS。

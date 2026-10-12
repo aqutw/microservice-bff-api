@@ -1,0 +1,8 @@
+_
+node_modules/
+.next/
+services/*/data/
+*.db
+*.db-shm
+*.db-wal
+dist/
