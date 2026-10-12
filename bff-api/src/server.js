@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createAuthenticator } from './auth.js';
 import { apiError, readBody, request } from './http.js';
 
 const defaults = {
@@ -14,13 +15,13 @@ const catalog = [
   { sku: 'mug', name: '霧黑陶杯', unitPriceCents: 650, available: 20 }
 ];
 
-function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*' }); res.end(JSON.stringify(body)); }
+function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); }
 function urlPath(req) { return new URL(req.url, 'http://localhost').pathname; }
 
 export async function checkout(input, variant, services = defaults, context = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw apiError('invalid_request', 400);
-  const userId = input.user_id || input.userId || 'demo-user';
-  if (typeof userId !== 'string' || userId.length > 128) throw apiError('invalid_user_id', 400);
+  const userId = context['x-actor-id'];
+  if (typeof userId !== 'string' || !userId || userId.length > 128) throw apiError('invalid_user_id', 400);
   const items = Array.isArray(input.items) ? input.items : [];
   if (!items.length) { const e = new Error('items_required'); e.status = 400; throw e; }
   const normalized = items.map(item => {
@@ -49,14 +50,22 @@ function formatCheckout(result, variant, normalized) {
     : { checkoutId: result.checkout_id, state: result.state, order: { id: result.order.id, status: result.order.status, total: { cents: cents, currency: 'TWD' }, items: normalized }, payment: { id: result.payment.id, status: result.payment.status, redirectUrl: result.payment.checkout_url }, inventory: { reservationId: result.inventory.reservation_id, status: result.inventory.status } };
 }
 
-export function createServer(variant, services = defaults) {
+export function createServer(variant, services = defaults, security = {}) {
+  const authenticate = security.authenticate || createAuthenticator();
+  const allowedOrigins = new Set((process.env.ALLOWED_ORIGINS || process.env.PUBLIC_URL || '').split(',').filter(Boolean));
   return async (req, res) => {
-    const context = { 'x-actor-id': req.headers['x-actor-id'] || 'bff-anonymous', 'x-correlation-id': req.headers['x-correlation-id'] || req.headers['x-request-id'] || `corr_${Date.now()}` };
+    const context = { 'x-correlation-id': typeof req.headers['x-correlation-id'] === 'string' && req.headers['x-correlation-id'].length <= 128 ? req.headers['x-correlation-id'] : randomUUID() };
     try {
       const path = urlPath(req);
-      if (req.method === 'OPTIONS') { res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,OPTIONS', 'access-control-allow-headers': 'content-type,authorization,idempotency-key,x-actor-id,x-correlation-id' }); return res.end(); }
+      const origin = req.headers.origin;
+      if (origin && !allowedOrigins.has(origin)) throw apiError('origin_forbidden', 403, false);
+      if (origin) { res.setHeader?.('access-control-allow-origin', origin); res.setHeader?.('vary', 'Origin'); }
+      if (req.method === 'OPTIONS') { res.writeHead(204, { 'access-control-allow-methods': 'GET,POST,OPTIONS', 'access-control-allow-headers': 'content-type,authorization,idempotency-key,x-correlation-id' }); return res.end(); }
       if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok', service: `${variant}-bff` });
       if (req.method === 'GET' && path === '/api/catalog') return json(res, 200, { products: catalog });
+      const identity = await authenticate(req);
+      context['x-actor-id'] = identity.id;
+      context['x-user-scopes'] = identity.auditRead ? 'audit:read' : '';
       if (req.method === 'GET' && path === '/api/audit/events') return json(res, 200, await auditEvents(req, services));
       if (req.method === 'POST' && path === '/api/checkout') {
         const result = await checkout(await readBody(req), variant, services, { ...context, 'idempotency-key': req.headers['idempotency-key'] });

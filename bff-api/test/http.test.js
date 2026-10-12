@@ -30,7 +30,7 @@ test('request parser distinguishes malformed JSON and oversized UTF-8 bodies', a
   await assert.rejects(bounded, error => error.status === 413);
 });
 
-test('checkout rejects non-object bodies and invalid user IDs as client errors', async () => {
+test('checkout rejects non-object bodies and missing trusted identities', async () => {
   for (const input of [null, [], 123, {user_id: {}, items: [{sku: 'mug', quantity: 1}]}]) {
     await assert.rejects(checkout(input, 'desktop'), error => error.status === 400);
   }

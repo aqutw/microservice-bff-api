@@ -2,6 +2,15 @@
   "name": "poc-bff-api",
   "private": true,
   "type": "module",
-  "scripts": {"desktop": "node src/desktop.js", "app": "node src/app.js", "test": "node --test"},
-  "engines": {"node": ">=22"}
+  "scripts": {
+    "desktop": "node src/desktop.js",
+    "app": "node src/app.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "jose": "6.2.12"
+  }
 }
