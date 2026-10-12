@@ -34,3 +34,22 @@ configuration fails closed. Never deploy a development issuer to production.
 
 The payment confirmation endpoint is a PoC payment simulation. Production payment
 settlement requires a provider integration and authenticated provider callbacks.
+
+## Resource permissions
+
+| Resource | Permission |
+| --- | --- |
+| Health / catalog | Public |
+| Create checkout | Authenticated user; owner is derived from identity |
+| Read order / checkout | Exact owner, enforced in BFF and Order |
+| Confirm simulated payment | Exact owner, checked before any mutation |
+| Read audit | `audit:read` scope or trusted `audit-reader` realm role |
+| Inventory / domain mutations | Authorized internal service only |
+
+Ownership violations return 404 to avoid disclosing resource existence. Audit
+permission failures return 403. Admin/audit privileges do not grant ownership of
+other users' purchases. Checkout idempotency namespaces include owner, channel
+and client key. Existing workflows retain their IDs so recovery remains possible;
+legacy `demo-user` / arbitrary user IDs are not automatically assigned to a new
+login. Explicitly reviewed identity mappings are required before migrating old
+owners. New owner namespaces prevent replaying an old anonymous workflow.

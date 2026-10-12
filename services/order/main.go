@@ -113,6 +113,10 @@ func orders(w http.ResponseWriter, r *http.Request) {
 		write(w, 400, map[string]string{"error": "invalid_request"})
 		return
 	}
+	if req.UserID != r.Header.Get("X-Actor-ID") {
+		write(w, 403, map[string]string{"error": "owner_mismatch"})
+		return
+	}
 	if req.Currency == "" {
 		req.Currency = "TWD"
 	}
@@ -155,6 +159,10 @@ func orderAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		write(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	if user != r.Header.Get("X-Actor-ID") {
+		write(w, 404, map[string]string{"error": "order_not_found"})
 		return
 	}
 	if r.Method == http.MethodGet {

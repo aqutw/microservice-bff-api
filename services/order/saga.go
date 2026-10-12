@@ -66,6 +66,10 @@ func checkouts(w http.ResponseWriter, r *http.Request) {
 		write(w, 400, map[string]string{"error": "invalid_request"})
 		return
 	}
+	if input.UserID != r.Header.Get("X-Actor-ID") {
+		write(w, 403, map[string]string{"error": "owner_mismatch"})
+		return
+	}
 	for _, item := range input.Items {
 		if item.SKU == "" || item.Quantity < 1 {
 			write(w, 400, map[string]string{"error": "invalid_items"})
@@ -88,7 +92,8 @@ func checkouts(w http.ResponseWriter, r *http.Request) {
 		}
 		key = hex.EncodeToString(random[:])
 	}
-	digest := sha256.Sum256([]byte(input.Channel + ":" + key))
+	namespace, _ := json.Marshal([]string{input.UserID, input.Channel, key})
+	digest := sha256.Sum256(namespace)
 	id := "chk_" + hex.EncodeToString(digest[:])
 	raw, _ := json.Marshal(input)
 	tx, err := db.Begin()
@@ -143,7 +148,13 @@ func checkoutStatus(w http.ResponseWriter, r *http.Request) {
 		write(w, 405, map[string]string{"error": "method_not_allowed"})
 		return
 	}
-	writeCheckout(w, strings.TrimPrefix(r.URL.Path, "/v1/checkouts/"))
+	id := strings.TrimPrefix(r.URL.Path, "/v1/checkouts/")
+	job, err := loadCheckout(id)
+	if err != nil || job.Input.UserID != r.Header.Get("X-Actor-ID") {
+		write(w, 404, map[string]string{"error": "checkout_not_found"})
+		return
+	}
+	writeCheckout(w, id)
 }
 func loadCheckout(id string) (checkoutJob, error) {
 	job := checkoutJob{ID: id}

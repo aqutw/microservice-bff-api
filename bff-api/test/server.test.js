@@ -9,7 +9,7 @@ const performCheckout = (input, variant, services, context = {}) => checkout(inp
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 function response(body, status = 200) { return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(body) }; }
-function ready(channel) { return { checkout_id: 'checkout-1', state: 'awaiting_payment', order: { id: 'ord-1', status: 'pending_payment' }, inventory: { reservation_id: 'rsv-1', status: 'reserved' }, payment: { id: 'pay-1', status: 'pending', checkout_url: 'http://pay.test', client_token: 'token-1' } }; }
+function ready(channel) { return { checkout_id: 'checkout-1', state: 'awaiting_payment', order: { user_id: 'user-1', id: 'ord-1', status: 'pending_payment' }, inventory: { reservation_id: 'rsv-1', status: 'reserved' }, payment: { id: 'pay-1', status: 'pending', checkout_url: 'http://pay.test', client_token: 'token-1' } }; }
 function invoke(handler, request) {
  return new Promise((resolve, reject) => {
   const output = { status: 200, headers: {} };
@@ -53,14 +53,15 @@ test('invalid SKUs, quantities and overflowing totals never create an order',asy
  for(const item of [null,{sku:'missing',quantity:1},{sku:'mug',quantity:'1'},{sku:'mug',quantity:0},{sku:'mug',quantity:1.5},{sku:'mug',quantity:Number.MAX_SAFE_INTEGER}]) await assert.rejects(performCheckout({items:[item]},'desktop'),error=>error.status===400);
 });
 test('processing checkouts expose a durable status resource',async()=>{
- globalThis.fetch=async()=>response({checkout_id:'c1',state:'processing'},202);
+ globalThis.fetch=async()=>response({checkout_id:'c1',state:'processing',order:{user_id:'user-1'}},202);
  const result=await invoke(server('desktop',{order:'http://order'}),{method:'GET',url:'/api/checkouts/c1',headers:{}});
  assert.equal(result.status,202);assert.equal(result.body.checkoutId,'c1');
 });
 
 test('confirm can repair Order after Payment already committed', async () => {
  let orderAttempts = 0;
- globalThis.fetch = async url => {
+ globalThis.fetch = async (url, options) => {
+  if (options?.method !== 'POST' && url.includes('/v1/orders/')) return response({id:'o1',user_id:'user-1'});
   if (url.includes('/v1/payments/')) return response({id:'p1',order_id:'o1',status:'paid'});
   orderAttempts++;
   return orderAttempts === 1 ? response({error:'unavailable'},503) : response({order_id:'o1',status:'paid'});
@@ -76,7 +77,7 @@ test('confirm can repair Order after Payment already committed', async () => {
 
 test('ready status uses the same frontend contract as checkout', async () => {
  const snapshot = ready();
- snapshot.order = {id:'ord-1',status:'pending_payment',total_cents:650,items:[{sku:'mug',quantity:1}]};
+ snapshot.order = {id:'ord-1',user_id:'user-1',status:'pending_payment',total_cents:650,items:[{sku:'mug',quantity:1}]};
  globalThis.fetch = async () => response(snapshot,201);
  for (const variant of ['desktop','app']) {
   const result = await invoke(server(variant,{order:'http://order'}),{method:'GET',url:'/api/checkouts/checkout-1',headers:{}});

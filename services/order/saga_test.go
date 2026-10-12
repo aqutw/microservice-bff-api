@@ -11,7 +11,7 @@ import (
 )
 
 func checkoutForTest(key string) *httptest.ResponseRecorder {
-	request := httptest.NewRequest("POST", "/v1/checkouts", strings.NewReader(`{"user_id":"user","items":[{"sku":"mug","quantity":1}],"total_cents":650,"currency":"TWD","channel":"web"}`))
+	request := ownedRequest("POST", "/v1/checkouts", strings.NewReader(`{"user_id":"user","items":[{"sku":"mug","quantity":1}],"total_cents":650,"currency":"TWD","channel":"web"}`))
 	request.Header.Set("Idempotency-Key", key)
 	response := httptest.NewRecorder()
 	checkouts(response, request)
@@ -53,7 +53,7 @@ func TestCheckoutReplayAndPayloadConflict(t *testing.T) {
 	if response := checkoutForTest("same-key"); response.Code != 201 {
 		t.Fatalf("replay=%d", response.Code)
 	}
-	conflict := httptest.NewRequest("POST", "/v1/checkouts", strings.NewReader(`{"user_id":"user","items":[{"sku":"mug","quantity":2}],"total_cents":1300,"currency":"TWD","channel":"web"}`))
+	conflict := ownedRequest("POST", "/v1/checkouts", strings.NewReader(`{"user_id":"user","items":[{"sku":"mug","quantity":2}],"total_cents":1300,"currency":"TWD","channel":"web"}`))
 	conflict.Header.Set("Idempotency-Key", "same-key")
 	response := httptest.NewRecorder()
 	checkouts(response, conflict)

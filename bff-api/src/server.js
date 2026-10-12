@@ -66,22 +66,33 @@ export function createServer(variant, services = defaults, security = {}) {
       const identity = await authenticate(req);
       context['x-actor-id'] = identity.id;
       context['x-user-scopes'] = identity.auditRead ? 'audit:read' : '';
-      if (req.method === 'GET' && path === '/api/audit/events') return json(res, 200, await auditEvents(req, services));
+      if (req.method === 'GET' && path === '/api/audit/events') {
+        if (!identity.auditRead) throw apiError('forbidden', 403, false);
+        return json(res, 200, await auditEvents(req, services, context));
+      }
       if (req.method === 'POST' && path === '/api/checkout') {
         const result = await checkout(await readBody(req), variant, services, { ...context, 'idempotency-key': req.headers['idempotency-key'] });
         return json(res, result.state === 'processing' ? 202 : 201, result);
       }
       const checkoutMatch = path.match(/^\/api\/checkouts\/([^/]+)$/);
       if (req.method === 'GET' && checkoutMatch) {
-        const result = await request(services.order, `/v1/checkouts/${encodeURIComponent(checkoutMatch[1])}`);
+        const result = await request(services.order, `/v1/checkouts/${encodeURIComponent(checkoutMatch[1])}`, { headers: context });
+        requireOwner(result.order?.user_id, identity);
         return json(res, result.state === 'processing' ? 202 : 200, formatCheckout(result, variant));
       }
       const orderMatch = path.match(/^\/api\/orders\/([^/]+)$/);
-      if (req.method === 'GET' && orderMatch) return json(res, 200, await request(services.order, `/v1/orders/${encodeURIComponent(orderMatch[1])}`));
+      if (req.method === 'GET' && orderMatch) {
+        const order = await request(services.order, `/v1/orders/${encodeURIComponent(orderMatch[1])}`, { headers: context });
+        requireOwner(order.user_id, identity);
+        return json(res, 200, order);
+      }
       const paymentMatch = path.match(/^\/api\/payments\/([^/]+)\/confirm$/);
       if (req.method === 'POST' && paymentMatch) {
+        const reference = await request(services.payment, `/v1/payments/${encodeURIComponent(paymentMatch[1])}`, { headers: context });
+        const order = await request(services.order, `/v1/orders/${encodeURIComponent(reference.order_id)}`, { headers: context });
+        requireOwner(order.user_id, identity);
         const payment = await request(services.payment, `/v1/payments/${encodeURIComponent(paymentMatch[1])}/confirm`, { method: 'POST', headers: context, body: '{}' });
-        await request(services.order, `/v1/orders/${payment.order_id}`, { method: 'POST', headers: context, body: JSON.stringify({ status: 'paid' }) });
+        await request(services.order, `/v1/orders/${encodeURIComponent(order.id)}`, { method: 'POST', headers: context, body: JSON.stringify({ status: 'paid' }) });
         return json(res, 200, variant === 'app' ? { paymentId: payment.id, state: 'paid', orderId: payment.order_id } : { payment, orderStatus: 'paid' });
       }
       return json(res, 404, { error: 'not_found' });
@@ -89,10 +100,14 @@ export function createServer(variant, services = defaults, security = {}) {
   };
 }
 
-async function auditEvents(req, services) {
+function requireOwner(owner, identity) {
+  if (!owner || owner !== identity.id) throw apiError('not_found', 404, false);
+}
+
+async function auditEvents(req, services, context) {
   const params = new URL(req.url, 'http://localhost').searchParams;
   const selectedService = params.get('service');
   if (selectedService && !['order', 'inventory', 'payment'].includes(selectedService)) { const error = new Error('invalid_audit_service'); error.status = 400; throw error; }
-  const body = await request(services.audit, `/v1/audit/events?${params.toString()}`);
+  const body = await request(services.audit, `/v1/audit/events?${params.toString()}`, { headers: context });
   return { ...body, source: 'audit-worker' };
 }
