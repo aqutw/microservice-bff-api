@@ -89,6 +89,30 @@ cd bff-api && npm test
 
 `.github/workflows/unit-test.yml` 會在非 `loadtest-*` branch 執行 Go tests、BFF contract tests 與 Next.js production build。現有 Verify Runbook 則保留作為 Docker Compose E2E smoke test。
 
+### Automated SIT
+
+`.github/workflows/sit.yml` 使用真實 Docker Compose containers 與 SQLite，執行 `scripts/sit.sh`。Push 到名稱不以 `loadtest-` 開頭的 branch、來源 branch 不以 `loadtest-` 開頭的 PR，以及在符合條件的 branch 手動觸發時，都會執行。`loadtest-` 開頭的 branch（含 `/` 子路徑）會排除；一般 unit-test CI 與 SIT 是獨立的 checks。
+
+SIT 會驗證：
+
+- 全部 API health、Next.js storefront 與 `/audit` HTTP 回應。
+- Desktop／App checkout、付款確認、重複付款拒絕、庫存扣減與 commit。
+- 庫存不足時訂單取消；Payment service 停止時，訂單取消且庫存釋放。
+- Audit Worker 停止期間 checkout 仍成功；重啟業務服務後，outbox 仍可補送至恢復的 Audit Store。
+- 使用唯一 `correlation_id` 等待指定事件送達，確認三個服務的事件與 actor；重複投遞去重與 service／limit 篩選。
+
+需要 Docker Compose v2、Bash、curl、jq，以及可下載 container images／依賴的網路。本地可在專案根目錄執行以下步驟；請使用獨立測試環境並停止占用 3000–3002、8081–8084 的服務：
+
+```bash
+export COMPOSE_PROJECT_NAME=poc-sit-local
+docker compose up --build -d
+bash scripts/sit.sh
+docker compose logs --no-color > artifacts/sit/compose.log 2>&1
+docker compose down -v --remove-orphans
+```
+
+腳本會停止／重啟 Payment、Audit Worker 與業務服務，不適合對共享開發環境執行。每次測試應使用新的 volumes。CI 會自動保存 build log、測試回應、SIT log 與 Compose logs 為 `sit-<run_id>-<run_attempt>` artifact（保留 7 天），並以 `always()` 清理 containers 與測試 volumes，即使測試失敗也會執行。這是 HTTP／資料層的 SIT；未包含瀏覽器操作測試或壓測。
+
 ## Verify runbook
 
 以下步驟使用 Docker Compose，會驗證服務健康狀態、Desktop／App BFF checkout、付款確認，以及庫存不足時的 Saga 補償。需要 `curl` 與 `jq`。

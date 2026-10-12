@@ -6,3 +6,4 @@ services/*/data/
 *.db-shm
 *.db-wal
 dist/
+artifacts/

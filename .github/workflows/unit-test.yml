@@ -3,7 +3,7 @@ name: unit-test
 on:
   push:
     branches-ignore:
-      - 'loadtest-*'
+      - 'loadtest-**'
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:

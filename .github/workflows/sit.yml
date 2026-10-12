@@ -1,0 +1,51 @@
+name: sit
+
+on:
+  push:
+    branches-ignore:
+      - 'loadtest-**'
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sit-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  sit:
+    if: github.ref_type == 'branch' && !startsWith(github.head_ref || github.ref_name, 'loadtest-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      COMPOSE_PROJECT_NAME: poc-sit-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start real services
+        run: |
+          mkdir -p artifacts/sit
+          set -o pipefail
+          docker compose up --build -d 2>&1 | tee artifacts/sit/build.log
+      - name: Run system integration tests
+        run: |
+          set -o pipefail
+          bash scripts/sit.sh 2>&1 | tee artifacts/sit/tests.log
+      - name: Collect service diagnostics
+        if: always()
+        run: |
+          mkdir -p artifacts/sit
+          docker compose ps --all > artifacts/sit/compose-ps.txt
+          docker compose logs --no-color --timestamps > artifacts/sit/compose.log 2>&1
+      - name: Upload SIT results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/sit/
+          retention-days: 7
+      - name: Remove test containers and volumes
+        if: always()
+        run: docker compose down -v --remove-orphans
