@@ -89,6 +89,32 @@ cd bff-api && npm test
 
 `.github/workflows/unit-test.yml` 會在非 `loadtest-*` branch 執行 Go tests、BFF contract tests 與 Next.js production build。現有 Verify Runbook 則保留作為 Docker Compose E2E smoke test。
 
+### Automated loadtest
+
+`.github/workflows/loadtest.yml` 只在 `loadtest-` 開頭的 branch 執行。Push、來源 branch 以 `loadtest-` 開頭的 Pull Request，以及手動觸發都會啟動新 Compose project，等待所有 service healthy 後使用 `grafana/k6:0.54.0` 執行 [loadtest/commerce.js](loadtest/commerce.js)。GitHub Actions 以 `github.head_ref` 判斷 Pull Request 的來源 branch；`loadtest-*` branch 不會執行一般 unit／SIT workflow。
+
+壓測包含：
+
+- catalog read：20 requests／second，30 秒。
+- audit read：10 requests／second，30 秒。
+- Desktop checkout：5 VUs，每個 3 次，包含付款確認與 inventory commit。
+- App checkout：3 VUs，每個 2 次，包含 App payment contract 與 inventory commit。
+
+門檻為 checks 成功率大於 95%、HTTP failure rate 小於 5%、catalog p95 小於 500ms、audit p95 小於 750ms、兩種 checkout p95 小於 1500ms。Checkout 使用 fresh volumes 與有限 iterations，避免 PoC 的有限 seed inventory 把壓測誤判成大量 `insufficient_stock`。CI 會保存 k6 summary、k6 log、Compose logs 與 service 狀態七天，完成後清理 containers／volumes。
+
+本地執行需要 Docker daemon 可用：
+
+```bash
+export COMPOSE_PROJECT_NAME=poc-loadtest-local
+docker compose up --build -d
+mkdir -p artifacts/loadtest
+docker run --rm --network host \
+  --volume "$PWD/loadtest:/scripts:ro" \
+  --volume "$PWD/artifacts/loadtest:/results" \
+  grafana/k6:0.54.0 run --summary-export=/results/k6-summary.json /scripts/commerce.js
+docker compose down -v --remove-orphans
+```
+
 ### Automated SIT
 
 `.github/workflows/sit.yml` 使用真實 Docker Compose containers 與 SQLite，執行 `scripts/sit.sh`。Push 到名稱不以 `loadtest-` 開頭的 branch、來源 branch 不以 `loadtest-` 開頭的 PR，以及在符合條件的 branch 手動觸發時，都會執行。`loadtest-` 開頭的 branch（含 `/` 子路徑）會排除；一般 unit-test CI 與 SIT 是獨立的 checks。

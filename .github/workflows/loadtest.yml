@@ -1,0 +1,65 @@
+name: loadtest
+
+on:
+  push:
+    branches:
+      - 'loadtest-**'
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: loadtest-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  k6:
+    if: github.ref_type == 'branch' && startsWith(github.head_ref || github.ref_name, 'loadtest-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_PROJECT_NAME: poc-loadtest-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and start services
+        run: |
+          mkdir -p artifacts/loadtest
+          set -o pipefail
+          docker compose up --build -d 2>&1 | tee artifacts/loadtest/build.log
+      - name: Wait for service health
+        run: |
+          for port in 8081 8082 8083 8084 3001 3002; do
+            for attempt in {1..60}; do
+              if curl --fail --silent --max-time 3 "http://127.0.0.1:${port}/healthz" >/dev/null; then break; fi
+              if [ "$attempt" = 60 ]; then exit 1; fi
+              sleep 1
+            done
+          done
+          curl --fail --silent --max-time 10 http://127.0.0.1:3000/audit >/dev/null
+      - name: Run k6 scenarios
+        run: |
+          docker run --rm --network host \
+            --volume "$PWD/loadtest:/scripts:ro" \
+            --volume "$PWD/artifacts/loadtest:/results" \
+            grafana/k6:0.54.0 run \
+            --summary-export=/results/k6-summary.json \
+            /scripts/commerce.js 2>&1 | tee artifacts/loadtest/k6.log
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          mkdir -p artifacts/loadtest
+          docker compose ps --all > artifacts/loadtest/compose-ps.txt || true
+          docker compose logs --no-color --timestamps > artifacts/loadtest/compose.log 2>&1 || true
+      - name: Upload loadtest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loadtest-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/loadtest/
+          retention-days: 7
+      - name: Remove test containers and volumes
+        if: always()
+        run: docker compose down -v --remove-orphans
