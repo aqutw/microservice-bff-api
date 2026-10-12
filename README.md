@@ -1,5 +1,7 @@
 # Commerce microservices PoC
 
+![Commerce microservices PoC](screenshot.jpg)
+
 依照 `_/訂單服務 庫存 金流紀錄，用3個微服務實現嗎？.md` 與 `_/web與app; go與nodejs.md`，這個 PoC 將前端通道與核心領域拆開：
 
 - `website/`：Next.js storefront，預設呼叫 desktop BFF。
