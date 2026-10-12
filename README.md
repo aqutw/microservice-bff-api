@@ -73,6 +73,22 @@ GET http://localhost:3001/api/audit/events
 
 Audit Worker API 為 `GET http://localhost:8084/v1/audit/events`；Node.js BFF 的 `GET /api/audit/events` 會轉送 query filters。Next.js audit dashboard 位於 http://localhost:3000/audit。BFF 支援 `service`、`event_type`、`aggregate_id`、`actor_id`、`correlation_id` 與 `limit` query filters，例如 `GET /api/audit/events?service=payment&limit=20`。
 
+## Tests
+
+第一階段測試已加入：三個業務 service 驗證 SQLite transaction 與 `audit_outbox`、audit-worker 驗證 `event_id` 去重、BFF 驗證 Desktop／App response contract 與 Audit API 故障隔離。
+
+本地執行：
+
+```bash
+cd services/order && go test ./...
+cd services/inventory && go test ./...
+cd services/payment && go test ./...
+cd services/audit-worker && go test ./...
+cd bff-api && npm test
+```
+
+`.github/workflows/unit-test.yml` 會在非 `loadtest-*` branch 執行 Go tests、BFF contract tests 與 Next.js production build。現有 Verify Runbook 則保留作為 Docker Compose E2E smoke test。
+
 ## Verify runbook
 
 以下步驟使用 Docker Compose，會驗證服務健康狀態、Desktop／App BFF checkout、付款確認，以及庫存不足時的 Saga 補償。需要 `curl` 與 `jq`。
