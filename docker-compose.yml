@@ -48,7 +48,7 @@ services:
   website:
     build: ./website
     environment:
-      NEXT_PUBLIC_BFF_URL: http://localhost:3001
+      BFF_URL: http://desktop-bff:3001
     ports: ["3000:3000"]
     depends_on: [desktop-bff]
 volumes:

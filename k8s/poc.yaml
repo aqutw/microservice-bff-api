@@ -186,7 +186,7 @@ spec:
         - name: website
           image: poc/website:dev
           ports: [{containerPort: 3000}]
-          env: [{name: NEXT_PUBLIC_BFF_URL, value: http://localhost:30001}]
+          env: [{name: BFF_URL, value: http://desktop-bff:3001}]
 ---
 apiVersion: v1
 kind: Service

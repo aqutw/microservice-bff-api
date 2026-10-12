@@ -51,7 +51,7 @@ test('invalid SKUs, quantities and overflowing totals never create an order',asy
 test('processing checkouts expose a durable status resource',async()=>{
  globalThis.fetch=async()=>response({checkout_id:'c1',state:'processing'},202);
  const result=await invoke(createServer('desktop',{order:'http://order'}),{method:'GET',url:'/api/checkouts/c1',headers:{}});
- assert.equal(result.status,202);assert.equal(result.body.checkout_id,'c1');
+ assert.equal(result.status,202);assert.equal(result.body.checkoutId,'c1');
 });
 
 test('confirm can repair Order after Payment already committed', async () => {
@@ -68,4 +68,19 @@ test('confirm can repair Order after Payment already committed', async () => {
  assert.equal(repaired.status,200);
  assert.equal(repaired.body.orderStatus,'paid');
  assert.equal(orderAttempts,2);
+});
+
+test('ready status uses the same frontend contract as checkout', async () => {
+ const snapshot = ready();
+ snapshot.order = {id:'ord-1',status:'pending_payment',total_cents:650,items:[{sku:'mug',quantity:1}]};
+ globalThis.fetch = async () => response(snapshot,201);
+ for (const variant of ['desktop','app']) {
+  const result = await invoke(createServer(variant,{order:'http://order'}),{method:'GET',url:'/api/checkouts/checkout-1',headers:{}});
+  assert.equal(result.status,200);
+  assert.equal(result.body.checkoutId,'checkout-1');
+  assert.equal(result.body.state,'awaiting_payment');
+  assert.equal(result.body.payment.id,'pay-1');
+  if (variant === 'desktop') assert.equal(result.body.inventory.reservationId,'rsv-1');
+  else assert.equal(result.body.payment.clientToken,'token-1');
+ }
 });

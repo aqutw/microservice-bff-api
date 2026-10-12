@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 
-const BFF_URL = process.env.NEXT_PUBLIC_BFF_URL || 'http://localhost:3001';
+const BFF_URL = '';
 
 export default function AuditPage() {
   const [events, setEvents] = useState([]);

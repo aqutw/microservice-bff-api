@@ -37,10 +37,16 @@ export async function checkout(input, variant, services = defaults, context = {}
     method: 'POST', headers: { ...context, 'idempotency-key': key },
     body: JSON.stringify({ user_id: userId, items: normalized.map(({ sku, quantity }) => ({ sku, quantity })), total_cents: totalCents, currency: 'TWD', channel })
   });
+  return formatCheckout(result, variant, normalized);
+}
+
+function formatCheckout(result, variant, normalized) {
+  normalized ||= (result.order?.items || []).map(item => ({ ...item, unitPriceCents: catalog.find(product => product.sku === item.sku)?.unitPriceCents }));
+  const cents = result.order?.total_cents ?? normalized.reduce((sum, item) => sum + item.quantity * item.unitPriceCents, 0);
   if (!['awaiting_payment', 'paid'].includes(result.state)) return { checkoutId: result.checkout_id, state: result.state || 'processing' };
   return variant === 'app'
-    ? { checkoutId: result.checkout_id, orderId: result.order.id, state: result.state, amount: { cents: totalCents, currency: 'TWD' }, payment: { id: result.payment.id, clientToken: result.payment.client_token }, reservationId: result.inventory.reservation_id }
-    : { checkoutId: result.checkout_id, order: { id: result.order.id, status: result.order.status, total: { cents: totalCents, currency: 'TWD' }, items: normalized }, payment: { id: result.payment.id, status: result.payment.status, redirectUrl: result.payment.checkout_url }, inventory: { reservationId: result.inventory.reservation_id, status: result.inventory.status } };
+    ? { checkoutId: result.checkout_id, orderId: result.order.id, state: result.state, amount: { cents: cents, currency: 'TWD' }, payment: { id: result.payment.id, clientToken: result.payment.client_token }, reservationId: result.inventory.reservation_id }
+    : { checkoutId: result.checkout_id, state: result.state, order: { id: result.order.id, status: result.order.status, total: { cents: cents, currency: 'TWD' }, items: normalized }, payment: { id: result.payment.id, status: result.payment.status, redirectUrl: result.payment.checkout_url }, inventory: { reservationId: result.inventory.reservation_id, status: result.inventory.status } };
 }
 
 export function createServer(variant, services = defaults) {
@@ -59,7 +65,7 @@ export function createServer(variant, services = defaults) {
       const checkoutMatch = path.match(/^\/api\/checkouts\/([^/]+)$/);
       if (req.method === 'GET' && checkoutMatch) {
         const result = await request(services.order, `/v1/checkouts/${encodeURIComponent(checkoutMatch[1])}`);
-        return json(res, result.state === 'processing' ? 202 : 200, result);
+        return json(res, result.state === 'processing' ? 202 : 200, formatCheckout(result, variant));
       }
       const orderMatch = path.match(/^\/api\/orders\/([^/]+)$/);
       if (req.method === 'GET' && orderMatch) return json(res, 200, await request(services.order, `/v1/orders/${encodeURIComponent(orderMatch[1])}`));

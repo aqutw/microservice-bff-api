@@ -47,7 +47,7 @@ cd services/payment && go mod download && go run .
 cd services/audit-worker && go mod download && go run .
 cd bff-api && npm run desktop
 cd bff-api && PORT=3002 npm run app
-cd website && npm ci && NEXT_PUBLIC_BFF_URL=http://localhost:3001 npm run dev
+cd website && npm ci && BFF_URL=http://localhost:3001 npm run dev
 ```
 
 也可一次啟動完整環境：
@@ -74,6 +74,14 @@ GET http://localhost:3001/api/audit/events
 ```
 
 Audit Worker API 為 `GET http://localhost:8084/v1/audit/events`；Node.js BFF 的 `GET /api/audit/events` 會轉送 query filters。Next.js audit dashboard 位於 http://localhost:3000/audit。BFF 支援 `service`、`event_type`、`aggregate_id`、`actor_id`、`correlation_id` 與 `limit` query filters，例如 `GET /api/audit/events?service=payment&limit=20`。
+
+## Website runtime configuration
+
+The browser calls relative `/api` URLs. Next.js proxies these requests to
+`BFF_URL`, read on every server request (default `http://localhost:3001` for
+local development). Compose and Kubernetes use `http://desktop-bff:3001`.
+The same standalone image can therefore run in different environments without
+rebuilding, and remote browsers do not need a localhost BFF or public BFF URL.
 
 ## Durable checkout recovery
 

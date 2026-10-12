@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-const BFF_URL = process.env.NEXT_PUBLIC_BFF_URL || 'http://localhost:3001';
+const BFF_URL = '';
 const fallbackProducts = [
   { sku: 'coffee-beans', name: '山嵐咖啡豆', unitPriceCents: 420 },
   { sku: 'tea-leaves', name: '冷杉烏龍茶', unitPriceCents: 280 },
@@ -21,9 +21,32 @@ export default function Home() {
     const items = products.filter(p => cart[p.sku]).map(p => ({ sku: p.sku, quantity: cart[p.sku], unit_price_cents: p.unitPriceCents }));
     if (!items.length) return;
     const fingerprint = JSON.stringify(items);
-    if (checkoutAttempt.current?.fingerprint !== fingerprint) checkoutAttempt.current = { fingerprint, key: crypto.randomUUID() };
+    if (checkoutAttempt.current?.fingerprint !== fingerprint) checkoutAttempt.current = { fingerprint, key: Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('') };
     setLoading(true); setResult(null);
-    try { const response = await fetch(`${BFF_URL}/api/checkout`, { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': checkoutAttempt.current.key }, body: JSON.stringify({ user_id: 'web-demo-user', items }) }); const body = await response.json(); setResult(response.ok ? body : { error: body.error || 'checkout_failed' }); if (response.ok) checkoutAttempt.current = null; } catch (error) { setResult({ error: error.message }); } finally { setLoading(false); }
+    try {
+      const response = await fetch(`${BFF_URL}/api/checkout`, {
+        method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': checkoutAttempt.current.key },
+        body: JSON.stringify({ user_id: 'web-demo-user', items })
+      });
+      let body = await response.json();
+      if (!response.ok) {
+        if (response.status < 500) checkoutAttempt.current = null;
+        throw new Error(body.error || 'checkout_failed');
+      }
+      setResult(body);
+      for (let attempt = 0; body.state === 'processing' && attempt < 90; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const status = await fetch(`/api/checkouts/${encodeURIComponent(body.checkoutId || body.checkout_id)}`);
+        body = await status.json();
+        if (!status.ok) {
+          if (status.status < 500) checkoutAttempt.current = null;
+          throw new Error(body.error || 'checkout_failed');
+        }
+        setResult(body);
+      }
+      if (body.state !== 'processing') checkoutAttempt.current = null;
+    } catch (error) { setResult({ error: error.message }); }
+    finally { setLoading(false); }
   }
   return <main className="shell">
     <header><p className="eyebrow">山嵐商店 / SERVICE POC</p><a className="back-link" href="/audit">open audit dashboard →</a><h1>一杯咖啡，三個服務。</h1><p className="lede">Next.js storefront → Desktop BFF → Order · Inventory · Payment.</p></header>
