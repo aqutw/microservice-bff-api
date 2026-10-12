@@ -64,7 +64,7 @@ curl -X POST http://localhost:3002/api/checkout \
   -d '{"user_id":"app-user","items":[{"sku":"mug","quantity":1,"unit_price_cents":650}]}'
 ```
 
-取得 payment id 後可呼叫 `POST /api/payments/{id}/confirm`，BFF 會同步把訂單狀態更新為 `paid`。
+取得 payment id 後可呼叫 `POST /api/payments/{id}/confirm`，BFF 會同步把訂單狀態更新為 `paid`。重複 confirm 回傳既有付款結果；Order 的持久化背景工作會核對 Payment，並補上中斷的 paid 更新，不需要客戶端重試。
 
 Audit events 由三個 Go service 寫入各自的 `audit_outbox`，背景 relay 送至 audit-worker 的 Audit Store，再由 Node.js BFF 讀取：
 
@@ -147,7 +147,7 @@ docker compose down -v --remove-orphans
 SIT 會驗證：
 
 - 全部 API health、Next.js storefront 與 `/audit` HTTP 回應。
-- Desktop／App checkout、付款確認、重複付款拒絕、庫存扣減與 commit。
+- Desktop／App checkout、付款確認、重複付款確認安全重播、庫存扣減與 commit。
 - 庫存不足時訂單取消；Payment service 停止時回傳處理中，Order 重啟後仍可恢復流程且庫存只扣一次。
 - Audit Worker 停止期間 checkout 仍成功；重啟業務服務後，outbox 仍可補送至恢復的 Audit Store。
 - 使用唯一 `correlation_id` 等待指定事件送達，確認三個服務的事件與 actor；重複投遞去重與 service／limit 篩選。

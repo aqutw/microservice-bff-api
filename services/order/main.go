@@ -179,14 +179,35 @@ func orderAction(w http.ResponseWriter, r *http.Request) {
 		write(w, 400, map[string]string{"error": "invalid_status"})
 		return
 	}
+	if body.Status == status {
+		write(w, 200, map[string]string{"order_id": id, "status": status})
+		return
+	}
+	transitions := map[string]map[string]bool{"pending_payment": {"paid": true, "cancelled": true}, "paid": {"shipped": true}}
+	if !transitions[status][body.Status] {
+		write(w, 409, map[string]string{"error": "invalid_order_transition", "status": status})
+		return
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		write(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if _, err = tx.Exec("UPDATE orders SET status=? WHERE id=?", body.Status, id); err != nil {
+	result, err := tx.Exec("UPDATE orders SET status=? WHERE id=? AND status=?", body.Status, id, status)
+	if err != nil {
 		_ = tx.Rollback()
 		write(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		_ = tx.Rollback()
+		var current string
+		if db.QueryRow("SELECT status FROM orders WHERE id=?", id).Scan(&current) == nil && current == body.Status {
+			write(w, 200, map[string]string{"order_id": id, "status": current})
+			return
+		}
+		write(w, 409, map[string]string{"error": "order_transition_conflict"})
 		return
 	}
 	if err = recordAuditTx(tx, r, "order.status_changed", "order", id, "update_status", "success", map[string]any{"status": status}, map[string]any{"status": body.Status}); err != nil {

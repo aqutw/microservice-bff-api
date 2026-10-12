@@ -172,7 +172,7 @@ func writeCheckout(w http.ResponseWriter, id string) {
 		write(w, job.ErrorStatus, map[string]any{"error": job.ErrorMessage, "checkout_id": id})
 		return
 	}
-	if job.Stage == "awaiting_payment" {
+	if job.Stage == "awaiting_payment" || job.Stage == "paid" {
 		write(w, 201, job.Result)
 		return
 	}
@@ -226,7 +226,7 @@ func callCheckout(job checkoutJob, base, path string, payload any) (json.RawMess
 
 func processCheckout(id string) {
 	now := time.Now().UnixMilli()
-	claim, err := db.Exec("UPDATE checkouts SET lease_until=? WHERE id=? AND stage IN ('reserve','payment','compensate') AND lease_until<=? AND next_attempt<=?", now+60000, id, now, now)
+	claim, err := db.Exec("UPDATE checkouts SET lease_until=? WHERE id=? AND stage IN ('reserve','payment','compensate','awaiting_payment') AND lease_until<=? AND next_attempt<=?", now+60000, id, now, now)
 	if err != nil {
 		log.Printf("checkout claim: %v", err)
 		return
@@ -274,15 +274,23 @@ func processCheckout(id string) {
 			if err == nil {
 				job.Result.State = "awaiting_payment"
 				err = checkpoint(&job, "awaiting_payment")
+				if err == nil {
+					return
+				}
 			}
 		case "compensate":
 			err = compensateCheckout(&job)
+		case "awaiting_payment":
+			err = reconcilePayment(&job)
+			if err == nil {
+				return
+			}
 		default:
 			return
 		}
 		if err != nil {
 			var failure upstreamFailure
-			if job.Stage != "compensate" && errors.As(err, &failure) && failure.status >= 400 && failure.status < 500 {
+			if job.Stage != "compensate" && job.Stage != "awaiting_payment" && errors.As(err, &failure) && failure.status >= 400 && failure.status < 500 {
 				job.ErrorStatus = failure.status
 				job.ErrorMessage = failure.message
 				// An explicit rejection has no committed side effect. Unknown outcomes
@@ -358,7 +366,7 @@ func compensateCheckout(job *checkoutJob) error {
 	return nil
 }
 func recoverCheckouts() {
-	rows, err := db.Query("SELECT id FROM checkouts WHERE stage IN ('reserve','payment','compensate') AND next_attempt<=? AND lease_until<=? ORDER BY next_attempt LIMIT 20", time.Now().UnixMilli(), time.Now().UnixMilli())
+	rows, err := db.Query("SELECT id FROM checkouts WHERE stage IN ('reserve','payment','compensate','awaiting_payment') AND next_attempt<=? AND lease_until<=? ORDER BY next_attempt LIMIT 20", time.Now().UnixMilli(), time.Now().UnixMilli())
 	if err != nil {
 		log.Printf("checkout recovery: %v", err)
 		return
@@ -382,4 +390,85 @@ func checkoutRecovery() {
 	for range ticker.C {
 		recoverCheckouts()
 	}
+}
+
+// A persisted awaiting-payment workflow remains a recovery job until Order
+// observes Payment's durable paid state. No client retry is required.
+func reconcilePayment(job *checkoutJob) error {
+	var reference struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(job.Result.Payment, &reference); err != nil {
+		return err
+	}
+	response, err := (&http.Client{Timeout: 3 * time.Second}).Get(env("PAYMENT_API_URL", "http://localhost:8083") + "/v1/payments/" + reference.ID)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != 200 {
+		return fmt.Errorf("payment_lookup_status_%d", response.StatusCode)
+	}
+	var payment struct {
+		Status   string `json:"status"`
+		OrderID  string `json:"order_id"`
+		Amount   int64  `json:"amount_cents"`
+		Currency string `json:"currency"`
+	}
+	if err = json.NewDecoder(io.LimitReader(response.Body, 1024*1024)).Decode(&payment); err != nil {
+		return err
+	}
+	if payment.Status != "paid" {
+		_, err = db.Exec("UPDATE checkouts SET next_attempt=? WHERE id=?", time.Now().Add(5*time.Second).UnixMilli(), job.ID)
+		return err
+	}
+	if payment.OrderID != job.Result.Order.ID || payment.Amount != job.Input.TotalCents || payment.Currency != job.Input.Currency {
+		return fmt.Errorf("payment_order_mismatch")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	changed, err := tx.Exec("UPDATE orders SET status='paid' WHERE id=? AND status='pending_payment'", job.Result.Order.ID)
+	if err != nil {
+		return err
+	}
+	count, err := changed.RowsAffected()
+	if err != nil {
+		return err
+	}
+	var current string
+	if err = tx.QueryRow("SELECT status FROM orders WHERE id=?", job.Result.Order.ID).Scan(&current); err != nil {
+		return err
+	}
+	if current != "paid" && current != "shipped" {
+		return fmt.Errorf("order_cannot_be_paid_%s", current)
+	}
+	if count == 1 {
+		request, _ := http.NewRequest(http.MethodPost, "/", nil)
+		request.Header.Set("X-Actor-ID", job.Actor)
+		request.Header.Set("X-Correlation-ID", job.Correlation)
+		if err = recordAuditTx(tx, request, "order.status_changed", "order", job.Result.Order.ID, "update_status", "success", map[string]any{"status": "pending_payment"}, map[string]any{"status": "paid"}); err != nil {
+			return err
+		}
+	}
+	job.Result.State = "paid"
+	job.Result.Order.Status = current
+	var snapshot map[string]any
+	if err = json.Unmarshal(job.Result.Payment, &snapshot); err != nil {
+		return err
+	}
+	snapshot["status"] = "paid"
+	job.Result.Payment, _ = json.Marshal(snapshot)
+	raw, _ := json.Marshal(job.Result)
+	_, err = tx.Exec("UPDATE checkouts SET stage='paid',result_json=?,attempts=0,next_attempt=0 WHERE id=?", string(raw), job.ID)
+	if err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	job.Stage = "paid"
+	return nil
 }

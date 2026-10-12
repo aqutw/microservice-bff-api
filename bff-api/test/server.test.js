@@ -53,3 +53,19 @@ test('processing checkouts expose a durable status resource',async()=>{
  const result=await invoke(createServer('desktop',{order:'http://order'}),{method:'GET',url:'/api/checkouts/c1',headers:{}});
  assert.equal(result.status,202);assert.equal(result.body.checkout_id,'c1');
 });
+
+test('confirm can repair Order after Payment already committed', async () => {
+ let orderAttempts = 0;
+ globalThis.fetch = async url => {
+  if (url.includes('/v1/payments/')) return response({id:'p1',order_id:'o1',status:'paid'});
+  orderAttempts++;
+  return orderAttempts === 1 ? response({error:'unavailable'},503) : response({order_id:'o1',status:'paid'});
+ };
+ const handler = createServer('desktop',{payment:'http://payment',order:'http://order'});
+ const req = {method:'POST',url:'/api/payments/p1/confirm',headers:{}};
+ assert.equal((await invoke(handler,req)).status,503);
+ const repaired = await invoke(handler,req);
+ assert.equal(repaired.status,200);
+ assert.equal(repaired.body.orderStatus,'paid');
+ assert.equal(orderAttempts,2);
+});

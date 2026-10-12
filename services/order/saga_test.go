@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -38,7 +39,9 @@ func TestCheckoutReplayAndPayloadConflict(t *testing.T) {
 	}))
 	defer inventory.Close()
 	payment := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		pay++
+		if r.Method == http.MethodPost {
+			pay++
+		}
 		write(w, 201, map[string]string{"id": "p1", "status": "pending"})
 	}))
 	defer payment.Close()
@@ -187,5 +190,47 @@ func TestConcurrentCheckoutKeyCreatesOneWorkflow(t *testing.T) {
 	_ = db.QueryRow("SELECT COUNT(*) FROM orders").Scan(&count)
 	if count != 1 {
 		t.Fatalf("orders=%d", count)
+	}
+}
+
+func TestPaidPaymentReconcilesWithoutClientRetry(t *testing.T) {
+	setupOrderTestDB(t)
+	var paid atomic.Bool
+	inventory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		write(w, 201, map[string]string{"reservation_id": "r1", "status": "reserved"})
+	}))
+	defer inventory.Close()
+	payment := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			job := jobForTest(t)
+			state := "pending"
+			if paid.Load() {
+				state = "paid"
+			}
+			write(w, 200, map[string]any{"id": "p1", "status": state, "order_id": job.Result.Order.ID, "amount_cents": 650, "currency": "TWD"})
+			return
+		}
+		write(w, 201, map[string]string{"id": "p1", "status": "pending", "checkout_url": "demo"})
+	}))
+	defer payment.Close()
+	t.Setenv("INVENTORY_API_URL", inventory.URL)
+	t.Setenv("PAYMENT_API_URL", payment.URL)
+	if response := checkoutForTest("paid-recovery"); response.Code != 201 {
+		t.Fatalf("status=%d", response.Code)
+	}
+	job := jobForTest(t)
+	// The payment commits while the caller cannot update Order.
+	paid.Store(true)
+	_, _ = db.Exec("UPDATE orders SET status='pending_payment' WHERE id=?", job.Result.Order.ID)
+	_, _ = db.Exec("UPDATE checkouts SET stage='awaiting_payment',next_attempt=0 WHERE id=?", job.ID)
+	recoverCheckouts()
+	recoverCheckouts()
+	job = jobForTest(t)
+	var status string
+	var count int
+	_ = db.QueryRow("SELECT status FROM orders WHERE id=?", job.Result.Order.ID).Scan(&status)
+	_ = db.QueryRow("SELECT COUNT(*) FROM audit_outbox WHERE event_type='order.status_changed'").Scan(&count)
+	if status != "paid" || job.Stage != "paid" || count != 1 {
+		t.Fatalf("order=%s stage=%s events=%d", status, job.Stage, count)
 	}
 }

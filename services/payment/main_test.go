@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -25,7 +26,7 @@ func setupPaymentTestDB(t *testing.T) {
 	t.Cleanup(func() { _ = testDB.Close(); db = previous })
 }
 
-func TestPaymentConfirmIsNotIdempotentlyRepeated(t *testing.T) {
+func TestPaymentConfirmIsIdempotent(t *testing.T) {
 	setupPaymentTestDB(t)
 	request := httptest.NewRequest("POST", "/v1/payments", strings.NewReader(`{"order_id":"ord-test","amount_cents":650,"currency":"TWD","channel":"web"}`))
 	response := httptest.NewRecorder()
@@ -46,8 +47,8 @@ func TestPaymentConfirmIsNotIdempotentlyRepeated(t *testing.T) {
 	}
 	secondResponse := httptest.NewRecorder()
 	paymentAction(secondResponse, httptest.NewRequest("POST", "/v1/payments/"+paymentID+"/confirm", strings.NewReader(`{}`)))
-	if secondResponse.Code != 409 {
-		t.Fatalf("second confirm = %d, want 409", secondResponse.Code)
+	if secondResponse.Code != 200 {
+		t.Fatalf("second confirm = %d, want 200", secondResponse.Code)
 	}
 	var count int
 	if err := db.QueryRow("SELECT COUNT(*) FROM audit_outbox WHERE aggregate_id = ?", paymentID).Scan(&count); err != nil {
@@ -86,5 +87,31 @@ func TestCreateReplayIsAtomic(t *testing.T) {
 	payments(w, r)
 	if w.Code != 409 {
 		t.Fatalf("conflict=%d", w.Code)
+	}
+}
+
+func TestConcurrentConfirmationEmitsOnePaidEvent(t *testing.T) {
+	setupPaymentTestDB(t)
+	created := httptest.NewRecorder()
+	payments(created, httptest.NewRequest("POST", "/v1/payments", strings.NewReader(`{"order_id":"race","amount_cents":650}`)))
+	var payment payment
+	_ = json.Unmarshal(created.Body.Bytes(), &payment)
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			response := httptest.NewRecorder()
+			paymentAction(response, httptest.NewRequest("POST", "/v1/payments/"+payment.ID+"/confirm", nil))
+			if response.Code != 200 {
+				t.Errorf("status=%d", response.Code)
+			}
+		}()
+	}
+	wg.Wait()
+	var count int
+	_ = db.QueryRow("SELECT COUNT(*) FROM audit_outbox WHERE event_type='payment.confirmed'").Scan(&count)
+	if count != 1 {
+		t.Fatalf("paid events=%d", count)
 	}
 }

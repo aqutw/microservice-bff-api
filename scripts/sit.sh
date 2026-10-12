@@ -74,8 +74,8 @@ call 200 desktop-confirm POST "http://localhost:3001/api/payments/$payment_id/co
 assert_json desktop-confirm '.payment.status == "paid" and .orderStatus == "paid"'
 call 200 desktop-order GET "http://localhost:3001/api/orders/$order_id" "$correlation"
 assert_json desktop-order '.status == "paid" and .total_cents == 650'
-call 409 duplicate-confirm POST "http://localhost:3001/api/payments/$payment_id/confirm" "$correlation"
-assert_json duplicate-confirm '.error == "payment_not_pending"'
+call 200 duplicate-confirm POST "http://localhost:3001/api/payments/$payment_id/confirm" "$correlation"
+assert_json duplicate-confirm '.payment.status == "paid" and .orderStatus == "paid"'
 call 200 desktop-commit POST "http://localhost:8082/v1/reservations/$reservation_id/commit" "$correlation"
 assert_json desktop-commit '.status == "committed"'
 wait_audit "$correlation" 6 desktop-audit

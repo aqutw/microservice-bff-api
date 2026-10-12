@@ -37,9 +37,9 @@ export async function checkout(input, variant, services = defaults, context = {}
     method: 'POST', headers: { ...context, 'idempotency-key': key },
     body: JSON.stringify({ user_id: userId, items: normalized.map(({ sku, quantity }) => ({ sku, quantity })), total_cents: totalCents, currency: 'TWD', channel })
   });
-  if (result.state !== 'awaiting_payment') return { checkoutId: result.checkout_id, state: result.state || 'processing' };
+  if (!['awaiting_payment', 'paid'].includes(result.state)) return { checkoutId: result.checkout_id, state: result.state || 'processing' };
   return variant === 'app'
-    ? { checkoutId: result.checkout_id, orderId: result.order.id, state: 'awaiting_payment', amount: { cents: totalCents, currency: 'TWD' }, payment: { id: result.payment.id, clientToken: result.payment.client_token }, reservationId: result.inventory.reservation_id }
+    ? { checkoutId: result.checkout_id, orderId: result.order.id, state: result.state, amount: { cents: totalCents, currency: 'TWD' }, payment: { id: result.payment.id, clientToken: result.payment.client_token }, reservationId: result.inventory.reservation_id }
     : { checkoutId: result.checkout_id, order: { id: result.order.id, status: result.order.status, total: { cents: totalCents, currency: 'TWD' }, items: normalized }, payment: { id: result.payment.id, status: result.payment.status, redirectUrl: result.payment.checkout_url }, inventory: { reservationId: result.inventory.reservation_id, status: result.inventory.status } };
 }
 

@@ -163,18 +163,35 @@ func paymentAction(w http.ResponseWriter, r *http.Request) {
 		write(w, 405, map[string]string{"error": "method_not_allowed"})
 		return
 	}
-	if p.Status != "pending" {
-		write(w, 409, map[string]string{"error": "payment_not_pending", "status": p.Status})
-		return
-	}
 	tx, err := db.Begin()
 	if err != nil {
 		write(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if _, err = tx.Exec("UPDATE payments SET status='paid' WHERE id=?", id); err != nil {
+	result, err := tx.Exec("UPDATE payments SET status='paid' WHERE id=? AND status='pending'", id)
+	if err != nil {
 		_ = tx.Rollback()
 		write(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		_ = tx.Rollback()
+		write(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	if changed == 0 {
+		err = tx.QueryRow("SELECT status FROM payments WHERE id=?", id).Scan(&p.Status)
+		_ = tx.Rollback()
+		if err != nil {
+			write(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		if p.Status == "paid" {
+			write(w, 200, p)
+			return
+		}
+		write(w, 409, map[string]string{"error": "payment_not_pending", "status": p.Status})
 		return
 	}
 	p.Status = "paid"

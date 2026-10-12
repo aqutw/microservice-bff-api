@@ -54,3 +54,25 @@ func TestOrderWritesOutboxForCreateAndStatusChange(t *testing.T) {
 		t.Fatalf("outbox events = %d, want 2", count)
 	}
 }
+
+func TestRepeatedOrderStatusDoesNotDuplicateAudit(t *testing.T) {
+	setupOrderTestDB(t)
+	created := httptest.NewRecorder()
+	orders(created, httptest.NewRequest("POST", "/v1/orders", strings.NewReader(`{"user_id":"user","items":[{"sku":"mug","quantity":1}],"total_cents":650}`)))
+	var result order
+	_ = json.Unmarshal(created.Body.Bytes(), &result)
+	for i := 0; i < 2; i++ {
+		response := httptest.NewRecorder()
+		orderAction(response, httptest.NewRequest("POST", "/v1/orders/"+result.ID, strings.NewReader(`{"status":"paid"}`)))
+		if response.Code != 200 {
+			t.Fatalf("status=%d", response.Code)
+		}
+	}
+	invalid := httptest.NewRecorder()
+	orderAction(invalid, httptest.NewRequest("POST", "/v1/orders/"+result.ID, strings.NewReader(`{"status":"pending_payment"}`)))
+	var count int
+	_ = db.QueryRow("SELECT COUNT(*) FROM audit_outbox WHERE aggregate_id=?", result.ID).Scan(&count)
+	if count != 2 || invalid.Code != 409 {
+		t.Fatalf("events=%d invalid transition=%d", count, invalid.Code)
+	}
+}
