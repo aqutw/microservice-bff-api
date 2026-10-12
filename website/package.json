@@ -2,5 +2,6 @@
   "name": "poc-next-website",
   "private": true,
   "scripts": {"dev": "next dev", "build": "next build", "start": "next start"},
-  "dependencies": {"next": "14.2.15", "react": "18.3.1", "react-dom": "18.3.1"}
+  "engines": {"node": ">=20.9.0"},
+  "dependencies": {"next": "16.4.0", "react": "19.3.0", "react-dom": "19.3.0"}
 }

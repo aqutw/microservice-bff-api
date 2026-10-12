@@ -36,7 +36,7 @@ cd bff-api && PORT=3002 npm run app
 
 ## Local run
 
-需要 Go 1.22、Node.js 20+。BFF 不依賴第三方 npm 套件；網站需要安裝 Next.js 依賴。
+需要 Go 1.22，建議使用 Node.js 22（網站最低要求 Node.js 20.9）。BFF 不依賴第三方 npm 套件；網站使用 Next.js 16 與 React 19，Docker 與網站 CI 採用 Node.js 22，並透過 `package-lock.json`／`npm ci` 固定依賴。
 
 ```bash
 cd services/order && go mod download && go run .
@@ -45,7 +45,7 @@ cd services/payment && go mod download && go run .
 cd services/audit-worker && go mod download && go run .
 cd bff-api && npm run desktop
 cd bff-api && PORT=3002 npm run app
-cd website && npm install && NEXT_PUBLIC_BFF_URL=http://localhost:3001 npm run dev
+cd website && npm ci && NEXT_PUBLIC_BFF_URL=http://localhost:3001 npm run dev
 ```
 
 也可一次啟動完整環境：
