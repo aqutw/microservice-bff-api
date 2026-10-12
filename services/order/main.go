@@ -56,18 +56,21 @@ func main() {
 		_ = os.MkdirAll(dir, 0755)
 	}
 	var err error
-	db, err = sql.Open("sqlite", path)
+	db, err = sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		log.Fatal(err)
 	}
 	if err = initDB(); err != nil {
 		log.Fatal(err)
 	}
+	go checkoutRecovery()
 	go auditRelay(env("AUDIT_WORKER_URL", "http://localhost:8084"))
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", health)
 	mux.HandleFunc("/v1/audit/events", auditEvents)
 	mux.HandleFunc("/v1/orders", orders)
+	mux.HandleFunc("/v1/checkouts", checkouts)
+	mux.HandleFunc("/v1/checkouts/", checkoutStatus)
 	mux.HandleFunc("/v1/orders/", orderAction)
 	addr := ":" + env("PORT", "8081")
 	log.Printf("order listening on %s", addr)
@@ -87,7 +90,10 @@ func base(p string) string {
 }
 func initDB() error {
 	_, err := db.Exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,items_json TEXT NOT NULL,total_cents INTEGER NOT NULL,currency TEXT NOT NULL,status TEXT NOT NULL,created_at DATETIME NOT NULL); CREATE TABLE IF NOT EXISTS audit_outbox (event_id TEXT PRIMARY KEY,event_type TEXT NOT NULL,service TEXT NOT NULL,aggregate_type TEXT NOT NULL,aggregate_id TEXT NOT NULL,actor_id TEXT NOT NULL,correlation_id TEXT NOT NULL,action TEXT NOT NULL,status TEXT NOT NULL,before_json TEXT,after_json TEXT,occurred_at DATETIME NOT NULL,published_at TEXT,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT);`)
-	return err
+	if err != nil {
+		return err
+	}
+	return initCheckouts()
 }
 func write(w http.ResponseWriter, s int, v any) {
 	w.Header().Set("Content-Type", "application/json")

@@ -53,7 +53,7 @@ func main() {
 		_ = os.MkdirAll(dir, 0755)
 	}
 	var err error
-	db, err = sql.Open("sqlite", path)
+	db, err = sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -84,7 +84,10 @@ func base(p string) string {
 }
 func initDB() error {
 	_, err := db.Exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS payments (id TEXT PRIMARY KEY,order_id TEXT NOT NULL,amount_cents INTEGER NOT NULL,currency TEXT NOT NULL,channel TEXT NOT NULL,status TEXT NOT NULL,created_at DATETIME NOT NULL); CREATE TABLE IF NOT EXISTS audit_outbox (event_id TEXT PRIMARY KEY,event_type TEXT NOT NULL,service TEXT NOT NULL,aggregate_type TEXT NOT NULL,aggregate_id TEXT NOT NULL,actor_id TEXT NOT NULL,correlation_id TEXT NOT NULL,action TEXT NOT NULL,status TEXT NOT NULL,before_json TEXT,after_json TEXT,occurred_at DATETIME NOT NULL,published_at TEXT,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT);`)
-	return err
+	if err != nil {
+		return err
+	}
+	return initIdempotency()
 }
 func write(w http.ResponseWriter, s int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -111,11 +114,11 @@ func payments(w http.ResponseWriter, r *http.Request) {
 		req.Channel = "web"
 	}
 	id := "pay_" + time.Now().UTC().Format("20060102150405.000000000")
-	tx, err := db.Begin()
-	if err != nil {
-		write(w, 500, map[string]string{"error": err.Error()})
+	tx, key, proceed := beginMutation(w, r, req)
+	if !proceed {
 		return
 	}
+	var err error
 	_, err = tx.Exec("INSERT INTO payments(id,order_id,amount_cents,currency,channel,status,created_at) VALUES(?,?,?,?,?,?,?)", id, req.OrderID, req.AmountCents, req.Currency, req.Channel, "pending", time.Now().UTC())
 	if err != nil {
 		_ = tx.Rollback()
@@ -127,17 +130,13 @@ func payments(w http.ResponseWriter, r *http.Request) {
 		write(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if err = tx.Commit(); err != nil {
-		write(w, 500, map[string]string{"error": err.Error()})
-		return
-	}
 	p := payment{ID: id, OrderID: req.OrderID, AmountCents: req.AmountCents, Currency: req.Currency, Channel: req.Channel, Status: "pending"}
 	if req.Channel == "app" {
 		p.ClientToken = "demo_" + id
 	} else {
 		p.CheckoutURL = "http://localhost:3000/checkout/demo/" + id
 	}
-	write(w, 201, p)
+	finishMutation(w, tx, key, 201, p)
 }
 func paymentAction(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/payments/"), "/")

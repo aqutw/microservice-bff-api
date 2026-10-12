@@ -11,7 +11,7 @@
 - `services/payment/`：Go＋SQLite，建立待付款交易與 demo confirm。
 - `services/audit-worker/`：Go＋SQLite，接收各服務背景轉送的 audit events，提供集中 Audit Store 與 Audit API。
 
-結帳流程是本地交易串接：先建待付款訂單，再預扣庫存，再建立金流；後續步驟失敗會取消訂單並釋放庫存，呈現 Saga 補償的 PoC。每個 Go service 會在同一個 SQLite transaction 寫入業務資料與 `audit_outbox`，背景 relay 非同步送到 audit-worker；因此 Audit Worker 或 Audit API 暫時故障時，不會卡住 checkout。SQLite 每個服務獨立持有，正式環境可替換為 PostgreSQL 與 message broker。
+結帳由 BFF 以伺服器 catalog 計價，再交給 Order service 的持久化 Saga：在同一 SQLite transaction 建立訂單與 checkout 工作，接著預扣庫存及建立付款。明確的業務拒絕會取消訂單並釋放庫存；網路錯誤或 timeout 的結果可能不明，會保留流程並用冪等請求重試。補償失敗也會保存為待重試工作。每個 Go service 會在同一個 SQLite transaction 寫入業務資料與 `audit_outbox`，背景 relay 非同步送到 audit-worker；因此 Audit Worker 或 Audit API 暫時故障時，不會卡住 checkout。SQLite 每個服務獨立持有，正式環境可替換為 PostgreSQL 與 message broker。
 
 ## Web／App BFF
 
@@ -75,6 +75,29 @@ GET http://localhost:3001/api/audit/events
 
 Audit Worker API 為 `GET http://localhost:8084/v1/audit/events`；Node.js BFF 的 `GET /api/audit/events` 會轉送 query filters。Next.js audit dashboard 位於 http://localhost:3000/audit。BFF 支援 `service`、`event_type`、`aggregate_id`、`actor_id`、`correlation_id` 與 `limit` query filters，例如 `GET /api/audit/events?service=payment&limit=20`。
 
+## Durable checkout recovery
+
+`POST /api/checkout` accepts an `Idempotency-Key` header (up to 200 characters).
+Reuse the same key after a timeout; changing the normalized request with the
+same key returns 409. Keys are scoped by Web/App channel. Prices always come
+from the BFF catalog; client price fields are ignored.
+
+The successful response keeps the Web/App contract and adds `checkoutId`.
+A temporarily unavailable dependency returns HTTP 202 with
+`{ "checkoutId": "chk_...", "state": "processing" }`. Poll
+`GET /api/checkouts/{checkoutId}`: 202 means pending, 200 means ready, and a
+business rejection returns its original error status. Order stores the request,
+progress, service results and compensation work in its existing SQLite volume.
+Inventory and Payment commit replay responses with business data and audit
+outbox entries, so a lost response cannot duplicate a reservation or payment.
+Recovery runs every second with bounded backoff; an interrupted claim can be
+reclaimed after its 60-second lease expires. Order needs `INVENTORY_API_URL`
+and `PAYMENT_API_URL`, configured in Compose and Kubernetes.
+
+BFF upstream requests default to a 3-second deadline, configurable with
+`UPSTREAM_TIMEOUT_MS`. If the caller times out before receiving a checkout ID,
+retry the original request with its original idempotency key.
+
 ## Tests
 
 第一階段測試已加入：三個業務 service 驗證 SQLite transaction 與 `audit_outbox`、audit-worker 驗證 `event_id` 去重、BFF 驗證 Desktop／App response contract 與 Audit API 故障隔離。
@@ -125,7 +148,7 @@ SIT 會驗證：
 
 - 全部 API health、Next.js storefront 與 `/audit` HTTP 回應。
 - Desktop／App checkout、付款確認、重複付款拒絕、庫存扣減與 commit。
-- 庫存不足時訂單取消；Payment service 停止時，訂單取消且庫存釋放。
+- 庫存不足時訂單取消；Payment service 停止時回傳處理中，Order 重啟後仍可恢復流程且庫存只扣一次。
 - Audit Worker 停止期間 checkout 仍成功；重啟業務服務後，outbox 仍可補送至恢復的 Audit Store。
 - 使用唯一 `correlation_id` 等待指定事件送達，確認三個服務的事件與 actor；重複投遞去重與 service／limit 篩選。
 

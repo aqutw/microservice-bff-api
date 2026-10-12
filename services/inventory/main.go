@@ -52,7 +52,7 @@ func main() {
 		log.Fatal(err)
 	}
 	var err error
-	db, err = sql.Open("sqlite", path)
+	db, err = sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -99,7 +99,10 @@ CREATE TABLE IF NOT EXISTS audit_outbox (event_id TEXT PRIMARY KEY,event_type TE
 	if count == 0 {
 		_, err = db.Exec("INSERT INTO stock(sku,available) VALUES ('coffee-beans',50),('tea-leaves',30),('mug',20)")
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return initIdempotency()
 }
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
@@ -153,11 +156,11 @@ func reservations(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	req.Items = merged
-	tx, err := db.Begin()
-	if err != nil {
-		writeJSON(w, 500, map[string]string{"error": err.Error()})
+	tx, key, proceed := beginMutation(w, r, req)
+	if !proceed {
 		return
 	}
+	var err error
 	for _, item := range req.Items {
 		result, updateErr := tx.Exec("UPDATE stock SET available = available - ? WHERE sku = ? AND available >= ?", item.Quantity, item.SKU, item.Quantity)
 		if updateErr != nil {
@@ -184,11 +187,7 @@ func reservations(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	if err = tx.Commit(); err != nil {
-		writeJSON(w, 500, map[string]string{"error": err.Error()})
-		return
-	}
-	writeJSON(w, 201, reservation{ID: id, OrderID: req.OrderID, Status: "reserved", Items: req.Items})
+	finishMutation(w, tx, key, 201, reservation{ID: id, OrderID: req.OrderID, Status: "reserved", Items: req.Items})
 }
 
 func reservationAction(w http.ResponseWriter, r *http.Request) {

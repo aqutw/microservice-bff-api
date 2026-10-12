@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 const BFF_URL = process.env.NEXT_PUBLIC_BFF_URL || 'http://localhost:3001';
 const fallbackProducts = [
@@ -13,14 +13,17 @@ export default function Home() {
   const [cart, setCart] = useState({});
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
+  const checkoutAttempt = useRef(null);
   useEffect(() => { fetch(`${BFF_URL}/api/catalog`).then(r => r.ok ? r.json() : null).then(data => data?.products && setProducts(data.products)).catch(() => {}); }, []);
   const total = useMemo(() => products.reduce((sum, p) => sum + (cart[p.sku] || 0) * p.unitPriceCents, 0), [cart, products]);
   const update = (sku, delta) => setCart(current => ({ ...current, [sku]: Math.max(0, (current[sku] || 0) + delta) }));
   async function checkout() {
     const items = products.filter(p => cart[p.sku]).map(p => ({ sku: p.sku, quantity: cart[p.sku], unit_price_cents: p.unitPriceCents }));
     if (!items.length) return;
+    const fingerprint = JSON.stringify(items);
+    if (checkoutAttempt.current?.fingerprint !== fingerprint) checkoutAttempt.current = { fingerprint, key: crypto.randomUUID() };
     setLoading(true); setResult(null);
-    try { const response = await fetch(`${BFF_URL}/api/checkout`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ user_id: 'web-demo-user', items }) }); const body = await response.json(); setResult(response.ok ? body : { error: body.error || 'checkout_failed' }); } catch (error) { setResult({ error: error.message }); } finally { setLoading(false); }
+    try { const response = await fetch(`${BFF_URL}/api/checkout`, { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': checkoutAttempt.current.key }, body: JSON.stringify({ user_id: 'web-demo-user', items }) }); const body = await response.json(); setResult(response.ok ? body : { error: body.error || 'checkout_failed' }); if (response.ok) checkoutAttempt.current = null; } catch (error) { setResult({ error: error.message }); } finally { setLoading(false); }
   }
   return <main className="shell">
     <header><p className="eyebrow">山嵐商店 / SERVICE POC</p><a className="back-link" href="/audit">open audit dashboard →</a><h1>一杯咖啡，三個服務。</h1><p className="lede">Next.js storefront → Desktop BFF → Order · Inventory · Payment.</p></header>

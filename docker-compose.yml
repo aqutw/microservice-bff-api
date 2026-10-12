@@ -13,6 +13,8 @@ services:
     build: ./services/order
     environment:
       AUDIT_WORKER_URL: http://audit-worker:8084
+      INVENTORY_API_URL: http://inventory:8082
+      PAYMENT_API_URL: http://payment:8083
     ports: ["8081:8081"]
     volumes: [order-data:/data]
   payment:

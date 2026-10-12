@@ -57,3 +57,34 @@ func TestPaymentConfirmIsNotIdempotentlyRepeated(t *testing.T) {
 		t.Fatalf("outbox events = %d, want 2", count)
 	}
 }
+
+func TestCreateReplayIsAtomic(t *testing.T) {
+	setupPaymentTestDB(t)
+	var first string
+	for i := 0; i < 2; i++ {
+		r := httptest.NewRequest("POST", "/", strings.NewReader(`{"order_id":"replay","amount_cents":650,"currency":"TWD","channel":"web"}`))
+		r.Header.Set("Idempotency-Key", "replay")
+		w := httptest.NewRecorder()
+		payments(w, r)
+		if w.Code != 201 {
+			t.Fatalf("status=%d %s", w.Code, w.Body)
+		}
+		if i == 0 {
+			first = w.Body.String()
+		} else if w.Body.String() != first {
+			t.Fatal("replay changed response")
+		}
+	}
+	var count int
+	_ = db.QueryRow("SELECT COUNT(*) FROM audit_outbox").Scan(&count)
+	if count != 1 {
+		t.Fatalf("events=%d", count)
+	}
+	r := httptest.NewRequest("POST", "/", strings.NewReader(strings.Replace(`{"order_id":"replay","amount_cents":650,"currency":"TWD","channel":"web"}`, "replay", "other", 1)))
+	r.Header.Set("Idempotency-Key", "replay")
+	w := httptest.NewRecorder()
+	payments(w, r)
+	if w.Code != 409 {
+		t.Fatalf("conflict=%d", w.Code)
+	}
+}

@@ -105,14 +105,24 @@ pass 'Stock rejection compensates the order without changing inventory'
 before=$(stock coffee-beans)
 docker compose stop payment
 correlation="$run_id-payment-failure"
-call 502 payment-failure POST http://localhost:3001/api/checkout "$correlation" \
+call 202 payment-failure POST http://localhost:3001/api/checkout "$correlation" \
   '{"user_id":"sit-failure","items":[{"sku":"coffee-beans","quantity":1,"unit_price_cents":420}]}'
-[[ $(stock coffee-beans) -eq $before ]] || fail 'Payment failure did not release inventory'
-wait_audit "$correlation" 4 payment-failure-audit
-assert_json payment-failure-audit 'any(.events[]; .event_type == "inventory.released") and any(.events[]; .service == "order" and .after.status == "cancelled")'
+assert_json payment-failure '.state == "processing" and (.checkoutId | type) == "string"'
+checkout_id=$(jq -er .checkoutId "$artifacts_dir/payment-failure.json")
+[[ $(stock coffee-beans) -eq $((before - 1)) ]] || fail 'Pending checkout did not keep its reservation'
+docker compose restart order
+wait_http http://localhost:8081/healthz
 docker compose start payment
 wait_http http://localhost:8083/healthz
-pass 'Payment service outage releases inventory and cancels the order'
+for attempt in {1..90}; do
+  status=$(curl --silent --show-error --max-time 5 --output "$artifacts_dir/payment-recovery.json" --write-out '%{http_code}' "http://localhost:3001/api/checkouts/$checkout_id")
+  if [[ "$status" == 200 ]] && jq -e '.state == "awaiting_payment"' "$artifacts_dir/payment-recovery.json" >/dev/null; then break; fi
+  sleep 1
+done
+assert_json payment-recovery '.state == "awaiting_payment" and (.payment.id | type) == "string"'
+[[ $(stock coffee-beans) -eq $((before - 1)) ]] || fail 'Recovery deducted stock more than once'
+wait_audit "$correlation" 3 payment-failure-audit
+pass 'Payment outage leaves a durable workflow that resumes after Order restart'
 
 docker compose stop audit-worker
 correlation="$run_id-audit-outage"

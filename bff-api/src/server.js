@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { apiError, readBody, request } from './http.js';
 
 const defaults = {
@@ -30,25 +31,16 @@ export async function checkout(input, variant, services = defaults, context = {}
   const totalCents = normalized.reduce((sum, item) => sum + item.quantity * item.unitPriceCents, 0);
   if (!Number.isSafeInteger(totalCents)) { const e = new Error('invalid_total'); e.status = 400; throw e; }
   const channel = variant === 'app' ? 'app' : 'web';
-  const order = await request(services.order, '/v1/orders', { method: 'POST', headers: context, body: JSON.stringify({ user_id: userId, items: normalized.map(({ sku, quantity }) => ({ sku, quantity })), total_cents: totalCents, currency: 'TWD' }) });
-  let reservation;
-  try {
-    reservation = await request(services.inventory, '/v1/reservations', { method: 'POST', headers: context, body: JSON.stringify({ order_id: order.id, items: normalized.map(({ sku, quantity }) => ({ sku, quantity })) }) });
-  } catch (error) {
-    await request(services.order, `/v1/orders/${order.id}`, { method: 'POST', headers: context, body: JSON.stringify({ status: 'cancelled' }) }).catch(() => {});
-    throw error;
-  }
-  let payment;
-  try {
-    payment = await request(services.payment, '/v1/payments', { method: 'POST', headers: context, body: JSON.stringify({ order_id: order.id, amount_cents: totalCents, currency: 'TWD', channel }) });
-  } catch (error) {
-    await request(services.inventory, `/v1/reservations/${reservation.reservation_id}/release`, { method: 'POST', headers: context }).catch(() => {});
-    await request(services.order, `/v1/orders/${order.id}`, { method: 'POST', headers: context, body: JSON.stringify({ status: 'cancelled' }) }).catch(() => {});
-    throw error;
-  }
+  const key = context['idempotency-key'] || randomUUID();
+  if (typeof key !== 'string' || key.length > 200) throw apiError('invalid_idempotency_key', 400);
+  const result = await request(services.order, '/v1/checkouts', {
+    method: 'POST', headers: { ...context, 'idempotency-key': key },
+    body: JSON.stringify({ user_id: userId, items: normalized.map(({ sku, quantity }) => ({ sku, quantity })), total_cents: totalCents, currency: 'TWD', channel })
+  });
+  if (result.state !== 'awaiting_payment') return { checkoutId: result.checkout_id, state: result.state || 'processing' };
   return variant === 'app'
-    ? { orderId: order.id, state: 'awaiting_payment', amount: { cents: totalCents, currency: 'TWD' }, payment: { id: payment.id, clientToken: payment.client_token }, reservationId: reservation.reservation_id }
-    : { order: { id: order.id, status: order.status, total: { cents: totalCents, currency: 'TWD' }, items: normalized.map(item => ({ sku: item.sku, quantity: item.quantity, unitPriceCents: item.unitPriceCents })) }, payment: { id: payment.id, status: payment.status, redirectUrl: payment.checkout_url }, inventory: { reservationId: reservation.reservation_id, status: reservation.status } };
+    ? { checkoutId: result.checkout_id, orderId: result.order.id, state: 'awaiting_payment', amount: { cents: totalCents, currency: 'TWD' }, payment: { id: result.payment.id, clientToken: result.payment.client_token }, reservationId: result.inventory.reservation_id }
+    : { checkoutId: result.checkout_id, order: { id: result.order.id, status: result.order.status, total: { cents: totalCents, currency: 'TWD' }, items: normalized }, payment: { id: result.payment.id, status: result.payment.status, redirectUrl: result.payment.checkout_url }, inventory: { reservationId: result.inventory.reservation_id, status: result.inventory.status } };
 }
 
 export function createServer(variant, services = defaults) {
@@ -56,11 +48,19 @@ export function createServer(variant, services = defaults) {
     const context = { 'x-actor-id': req.headers['x-actor-id'] || 'bff-anonymous', 'x-correlation-id': req.headers['x-correlation-id'] || req.headers['x-request-id'] || `corr_${Date.now()}` };
     try {
       const path = urlPath(req);
-      if (req.method === 'OPTIONS') { res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,OPTIONS', 'access-control-allow-headers': 'content-type,authorization' }); return res.end(); }
+      if (req.method === 'OPTIONS') { res.writeHead(204, { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'GET,POST,OPTIONS', 'access-control-allow-headers': 'content-type,authorization,idempotency-key,x-actor-id,x-correlation-id' }); return res.end(); }
       if (req.method === 'GET' && path === '/healthz') return json(res, 200, { status: 'ok', service: `${variant}-bff` });
       if (req.method === 'GET' && path === '/api/catalog') return json(res, 200, { products: catalog });
       if (req.method === 'GET' && path === '/api/audit/events') return json(res, 200, await auditEvents(req, services));
-      if (req.method === 'POST' && path === '/api/checkout') return json(res, 201, await checkout(await readBody(req), variant, services, context));
+      if (req.method === 'POST' && path === '/api/checkout') {
+        const result = await checkout(await readBody(req), variant, services, { ...context, 'idempotency-key': req.headers['idempotency-key'] });
+        return json(res, result.state === 'processing' ? 202 : 201, result);
+      }
+      const checkoutMatch = path.match(/^\/api\/checkouts\/([^/]+)$/);
+      if (req.method === 'GET' && checkoutMatch) {
+        const result = await request(services.order, `/v1/checkouts/${encodeURIComponent(checkoutMatch[1])}`);
+        return json(res, result.state === 'processing' ? 202 : 200, result);
+      }
       const orderMatch = path.match(/^\/api\/orders\/([^/]+)$/);
       if (req.method === 'GET' && orderMatch) return json(res, 200, await request(services.order, `/v1/orders/${encodeURIComponent(orderMatch[1])}`));
       const paymentMatch = path.match(/^\/api\/payments\/([^/]+)\/confirm$/);
