@@ -321,35 +321,84 @@ func processCheckout(id string) {
 		}
 	}
 }
-func compensateCheckout(job *checkoutJob) error {
-	if len(job.Result.Inventory) > 0 {
-		var reservation struct {
-			ID string `json:"reservation_id"`
-		}
-		if err := json.Unmarshal(job.Result.Inventory, &reservation); err != nil {
+// reservationID extracts the reservation reference from a checkout result.
+func reservationID(result checkoutResult) string {
+	var reservation struct {
+		ID string `json:"reservation_id"`
+	}
+	_ = json.Unmarshal(result.Inventory, &reservation)
+	return reservation.ID
+}
+
+// releaseInventoryReservation releases a hold and tolerates a lost response by
+// re-reading the reservation when the upstream reports it is no longer active.
+func releaseInventoryReservation(job checkoutJob, id string) error {
+	if id == "" {
+		return nil
+	}
+	if _, err := callCheckout(job, env("INVENTORY_API_URL", "https://localhost:8082"), "/v1/reservations/"+id+"/release", nil); err != nil {
+		var failure upstreamFailure
+		if !errors.As(err, &failure) || failure.status != 409 {
 			return err
 		}
-		_, err := callCheckout(*job, env("INVENTORY_API_URL", "https://localhost:8082"), "/v1/reservations/"+reservation.ID+"/release", nil)
-		if err != nil {
-			var failure upstreamFailure
-			if !errors.As(err, &failure) || failure.status != 409 {
-				return err
-			}
-			// A prior successful release can lose its response; verify it was released.
-			lookup, _ := http.NewRequest(http.MethodGet, env("INVENTORY_API_URL", "https://localhost:8082")+"/v1/reservations/"+reservation.ID, nil)
-			response, getErr := serviceAuth.Do(&http.Client{Timeout: 3 * time.Second}, "inventory", lookup)
-			if getErr != nil {
-				return getErr
-			}
-			var existing struct {
-				Status string `json:"status"`
-			}
-			decodeErr := json.NewDecoder(response.Body).Decode(&existing)
-			response.Body.Close()
-			if response.StatusCode != 200 || decodeErr != nil || existing.Status != "released" {
-				return err
-			}
+		status, getErr := inventoryReservationStatus(job, id)
+		if getErr != nil {
+			return getErr
 		}
+		if status != "released" && status != "expired" {
+			return err
+		}
+	}
+	return nil
+}
+
+// commitInventoryReservation turns a hold into a permanent sale. It is
+// idempotent so a lost response can be replayed until the reservation is
+// observed as committed.
+func commitInventoryReservation(job checkoutJob, id string) error {
+	if id == "" {
+		return nil
+	}
+	if _, err := callCheckout(job, env("INVENTORY_API_URL", "https://localhost:8082"), "/v1/reservations/"+id+"/commit", nil); err != nil {
+		var failure upstreamFailure
+		if !errors.As(err, &failure) || failure.status != 409 {
+			return err
+		}
+		status, getErr := inventoryReservationStatus(job, id)
+		if getErr != nil {
+			return getErr
+		}
+		if status != "committed" {
+			return err
+		}
+	}
+	return nil
+}
+
+func inventoryReservationStatus(job checkoutJob, id string) (string, error) {
+	lookup, _ := http.NewRequest(http.MethodGet, env("INVENTORY_API_URL", "https://localhost:8082")+"/v1/reservations/"+id, nil)
+	lookup.Header.Set("X-Actor-ID", job.Actor)
+	lookup.Header.Set("X-Correlation-ID", job.Correlation)
+	response, err := serviceAuth.Do(&http.Client{Timeout: 3 * time.Second}, "inventory", lookup)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("reservation_lookup_status_%d", response.StatusCode)
+	}
+	var existing struct {
+		Status string `json:"status"`
+	}
+	if err = json.NewDecoder(io.LimitReader(response.Body, 1024*1024)).Decode(&existing); err != nil {
+		return "", err
+	}
+	return existing.Status, nil
+}
+
+func compensateCheckout(job *checkoutJob) error {
+	if err := releaseInventoryReservation(*job, reservationID(job.Result)); err != nil {
+		return err
 	}
 	tx, err := db.Begin()
 	if err != nil {
@@ -442,6 +491,20 @@ func reconcilePayment(job *checkoutJob) error {
 	if payment.OrderID != job.Result.Order.ID || payment.Amount != job.Input.TotalCents || payment.Currency != job.Input.Currency {
 		return fmt.Errorf("payment_order_mismatch")
 	}
+	reservation := reservationID(job.Result)
+	if reservation != "" {
+		status, statusErr := inventoryReservationStatus(*job, reservation)
+		if statusErr != nil {
+			return statusErr
+		}
+		// The hold expired (or was released) before payment settled: paying now
+		// would oversell, so cancel the order instead of marking it paid.
+		if status != "reserved" && status != "committed" {
+			job.ErrorStatus = 409
+			job.ErrorMessage = "reservation_expired"
+			return checkpoint(job, "compensate")
+		}
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -478,12 +541,16 @@ func reconcilePayment(job *checkoutJob) error {
 	}
 	snapshot["status"] = "paid"
 	job.Result.Payment, _ = json.Marshal(snapshot)
-	raw, _ := json.Marshal(job.Result)
-	_, err = tx.Exec("UPDATE checkouts SET stage='paid',result_json=?,attempts=0,next_attempt=0 WHERE id=?", string(raw), job.ID)
-	if err != nil {
+	if err = tx.Commit(); err != nil {
 		return err
 	}
-	if err = tx.Commit(); err != nil {
+	// Only a paid order converts the hold into a permanent sale; this keeps the
+	// reservation out of the expiry sweeper's reach. Retry until it is committed.
+	if err = commitInventoryReservation(*job, reservation); err != nil {
+		return err
+	}
+	raw, _ := json.Marshal(job.Result)
+	if _, err = db.Exec("UPDATE checkouts SET stage='paid',result_json=?,attempts=0,next_attempt=0 WHERE id=?", string(raw), job.ID); err != nil {
 		return err
 	}
 	job.Stage = "paid"
