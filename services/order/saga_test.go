@@ -193,6 +193,127 @@ func TestConcurrentCheckoutKeyCreatesOneWorkflow(t *testing.T) {
 	}
 }
 
+func TestInventoryRejectionCancelsOrder(t *testing.T) {
+	setupOrderTestDB(t)
+	var paymentCalled atomic.Int32
+	inventory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		write(w, 409, map[string]string{"error": "insufficient_stock"})
+	}))
+	defer inventory.Close()
+	payment := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paymentCalled.Add(1)
+		write(w, 500, map[string]string{"error": "unexpected"})
+	}))
+	defer payment.Close()
+	t.Setenv("INVENTORY_API_URL", inventory.URL)
+	t.Setenv("PAYMENT_API_URL", payment.URL)
+	if response := checkoutForTest("insufficient"); response.Code != 409 {
+		t.Fatalf("status=%d %s", response.Code, response.Body)
+	}
+	job := jobForTest(t)
+	var status string
+	_ = db.QueryRow("SELECT status FROM orders WHERE id=?", job.Result.Order.ID).Scan(&status)
+	if status != "cancelled" || job.Stage != "failed" || job.ErrorStatus != 409 || paymentCalled.Load() != 0 {
+		t.Fatalf("order=%s stage=%s error=%d payment=%d", status, job.Stage, job.ErrorStatus, paymentCalled.Load())
+	}
+}
+
+func TestPaidOrderCommitsReservation(t *testing.T) {
+	setupOrderTestDB(t)
+	var mu sync.Mutex
+	state, committed := "reserved", 0
+	inventory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/commit") {
+			state, committed = "committed", committed+1
+			write(w, 200, map[string]string{"reservation_id": "r1", "status": "committed"})
+			return
+		}
+		if r.Method == http.MethodGet {
+			write(w, 200, map[string]string{"reservation_id": "r1", "status": state})
+			return
+		}
+		write(w, 201, map[string]string{"reservation_id": "r1", "status": "reserved"})
+	}))
+	defer inventory.Close()
+	payment := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			job := jobForTest(t)
+			write(w, 200, map[string]any{"id": "p1", "status": "paid", "order_id": job.Result.Order.ID, "amount_cents": 650, "currency": "TWD"})
+			return
+		}
+		write(w, 201, map[string]string{"id": "p1", "status": "pending"})
+	}))
+	defer payment.Close()
+	t.Setenv("INVENTORY_API_URL", inventory.URL)
+	t.Setenv("PAYMENT_API_URL", payment.URL)
+	if response := checkoutForTest("paid-commit"); response.Code != 201 {
+		t.Fatalf("status=%d", response.Code)
+	}
+	job := jobForTest(t)
+	_, _ = db.Exec("UPDATE checkouts SET next_attempt=0,lease_until=0 WHERE id=?", job.ID)
+	recoverCheckouts()
+	job = jobForTest(t)
+	var status, reservation string
+	_ = db.QueryRow("SELECT status,reservation_id FROM orders WHERE id=?", job.Result.Order.ID).Scan(&status, &reservation)
+	mu.Lock()
+	commits, finalState := committed, state
+	mu.Unlock()
+	if status != "paid" || job.Stage != "paid" || reservation != "r1" || commits != 1 || finalState != "committed" {
+		t.Fatalf("order=%s stage=%s reservation=%s commits=%d state=%s", status, job.Stage, reservation, commits, finalState)
+	}
+}
+
+func TestDirectOrderCancelReleasesReservation(t *testing.T) {
+	setupOrderTestDB(t)
+	var mu sync.Mutex
+	state, releases := "reserved", 0
+	inventory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/release") {
+			state, releases = "released", releases+1
+			write(w, 200, map[string]string{"reservation_id": "r1", "status": "released"})
+			return
+		}
+		if r.Method == http.MethodGet {
+			write(w, 200, map[string]string{"reservation_id": "r1", "status": state})
+			return
+		}
+		write(w, 201, map[string]string{"reservation_id": "r1", "status": "reserved"})
+	}))
+	defer inventory.Close()
+	payment := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		write(w, 201, map[string]string{"id": "p1", "status": "pending"})
+	}))
+	defer payment.Close()
+	t.Setenv("INVENTORY_API_URL", inventory.URL)
+	t.Setenv("PAYMENT_API_URL", payment.URL)
+	if response := checkoutForTest("direct-cancel"); response.Code != 201 {
+		t.Fatalf("status=%d", response.Code)
+	}
+	job := jobForTest(t)
+	var reservation string
+	_ = db.QueryRow("SELECT reservation_id FROM orders WHERE id=?", job.Result.Order.ID).Scan(&reservation)
+	if reservation != "r1" {
+		t.Fatalf("reservation_id=%q", reservation)
+	}
+	response := httptest.NewRecorder()
+	orderAction(response, ownedRequest("POST", "/v1/orders/"+job.Result.Order.ID, strings.NewReader(`{"status":"cancelled"}`)))
+	if response.Code != 200 {
+		t.Fatalf("cancel=%d %s", response.Code, response.Body)
+	}
+	var status string
+	_ = db.QueryRow("SELECT status FROM orders WHERE id=?", job.Result.Order.ID).Scan(&status)
+	mu.Lock()
+	released := releases
+	mu.Unlock()
+	if status != "cancelled" || released != 1 {
+		t.Fatalf("order=%s releases=%d", status, released)
+	}
+}
+
 func TestPaidPaymentReconcilesWithoutClientRetry(t *testing.T) {
 	setupOrderTestDB(t)
 	var paid atomic.Bool

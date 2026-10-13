@@ -99,8 +99,12 @@ func base(p string) string {
 	return p
 }
 func initDB() error {
-	_, err := db.Exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,items_json TEXT NOT NULL,total_cents INTEGER NOT NULL,currency TEXT NOT NULL,status TEXT NOT NULL,created_at DATETIME NOT NULL); CREATE TABLE IF NOT EXISTS audit_outbox (event_id TEXT PRIMARY KEY,event_type TEXT NOT NULL,service TEXT NOT NULL,aggregate_type TEXT NOT NULL,aggregate_id TEXT NOT NULL,actor_id TEXT NOT NULL,correlation_id TEXT NOT NULL,action TEXT NOT NULL,status TEXT NOT NULL,before_json TEXT,after_json TEXT,occurred_at DATETIME NOT NULL,published_at TEXT,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT);`)
+	_, err := db.Exec(`PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY,user_id TEXT NOT NULL,items_json TEXT NOT NULL,total_cents INTEGER NOT NULL,currency TEXT NOT NULL,status TEXT NOT NULL,created_at DATETIME NOT NULL,reservation_id TEXT NOT NULL DEFAULT ''); CREATE TABLE IF NOT EXISTS audit_outbox (event_id TEXT PRIMARY KEY,event_type TEXT NOT NULL,service TEXT NOT NULL,aggregate_type TEXT NOT NULL,aggregate_id TEXT NOT NULL,actor_id TEXT NOT NULL,correlation_id TEXT NOT NULL,action TEXT NOT NULL,status TEXT NOT NULL,before_json TEXT,after_json TEXT,occurred_at DATETIME NOT NULL,published_at TEXT,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT);`)
 	if err != nil {
+		return err
+	}
+	// Databases created before orders tracked inventory holds need the column.
+	if _, err = db.Exec("ALTER TABLE orders ADD COLUMN reservation_id TEXT NOT NULL DEFAULT ''"); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
 	return initCheckouts()
@@ -160,9 +164,9 @@ func orderAction(w http.ResponseWriter, r *http.Request) {
 		write(w, 404, map[string]string{"error": "not_found"})
 		return
 	}
-	var user, raw, currency, status, created string
+	var user, raw, currency, status, created, reservationID string
 	var total int64
-	err := db.QueryRow("SELECT user_id,items_json,total_cents,currency,status,created_at FROM orders WHERE id=?", id).Scan(&user, &raw, &total, &currency, &status, &created)
+	err := db.QueryRow("SELECT user_id,items_json,total_cents,currency,status,created_at,reservation_id FROM orders WHERE id=?", id).Scan(&user, &raw, &total, &currency, &status, &created, &reservationID)
 	if err == sql.ErrNoRows {
 		write(w, 404, map[string]string{"error": "order_not_found"})
 		return
@@ -227,6 +231,15 @@ func orderAction(w http.ResponseWriter, r *http.Request) {
 		}
 		write(w, 409, map[string]string{"error": "order_transition_conflict"})
 		return
+	}
+	// Cancelling must also release the inventory hold so stock is not stranded.
+	if body.Status == "cancelled" {
+		job := checkoutJob{Actor: r.Header.Get("X-Actor-ID"), Correlation: r.Header.Get("X-Correlation-ID")}
+		if err = releaseInventoryReservation(job, reservationID); err != nil {
+			_ = tx.Rollback()
+			write(w, 502, map[string]string{"error": "inventory_release_failed"})
+			return
+		}
 	}
 	if err = recordAuditTx(tx, r, "order.status_changed", "order", id, "update_status", "success", map[string]any{"status": status}, map[string]any{"status": body.Status}); err != nil {
 		_ = tx.Rollback()

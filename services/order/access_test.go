@@ -8,7 +8,7 @@ import (
 
 func TestResourceOwnershipRejectsOtherUserWithoutWrites(t *testing.T) {
 	setupOrderTestDB(t)
-	_, err := db.Exec(`INSERT INTO orders VALUES('owned','alice','[]',650,'TWD','pending_payment',CURRENT_TIMESTAMP)`)
+	_, err := db.Exec(`INSERT INTO orders(id,user_id,items_json,total_cents,currency,status,created_at) VALUES('owned','alice','[]',650,'TWD','pending_payment',CURRENT_TIMESTAMP)`)
 	if err != nil {
 		t.Fatal(err)
 	}

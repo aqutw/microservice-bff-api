@@ -260,6 +260,23 @@ func processCheckout(id string) {
 		return
 	}
 	for step := 0; step < 3; step++ {
+		// A direct cancel of the order must stop the workflow instead of still
+		// reserving stock or charging a payment the user already abandoned.
+		if job.Stage == "reserve" || job.Stage == "payment" || job.Stage == "awaiting_payment" {
+			var orderStatus string
+			if scanErr := db.QueryRow("SELECT status FROM orders WHERE id=?", job.Result.Order.ID).Scan(&orderStatus); scanErr == nil && orderStatus == "cancelled" {
+				if reservationID(job.Result) != "" {
+					if checkpoint(&job, "compensate") != nil {
+						return
+					}
+					continue
+				}
+				job.ErrorStatus = 409
+				job.ErrorMessage = "order_cancelled"
+				_ = checkpoint(&job, "failed")
+				return
+			}
+		}
 		switch job.Stage {
 		case "reserve":
 			job.Result.Inventory, err = callCheckout(job, env("INVENTORY_API_URL", "https://localhost:8082"), "/v1/reservations", map[string]any{"order_id": job.Result.Order.ID, "items": job.Input.Items})
@@ -271,6 +288,9 @@ func processCheckout(id string) {
 				if err == nil && reservation.ID == "" {
 					err = fmt.Errorf("invalid_reservation_response")
 				}
+			}
+			if err == nil {
+				_, err = db.Exec("UPDATE orders SET reservation_id=? WHERE id=?", reservationID(job.Result), job.Result.Order.ID)
 			}
 			if err == nil {
 				err = checkpoint(&job, "payment")
