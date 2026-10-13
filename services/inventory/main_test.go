@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func setupInventoryTestDB(t *testing.T) {
@@ -187,6 +188,57 @@ func TestInventoryReserveReleaseAndOutbox(t *testing.T) {
 	}
 	if count != 2 {
 		t.Fatalf("outbox events = %d, want 2", count)
+	}
+}
+
+func TestExpiredReservationsAreReleasedBySweeper(t *testing.T) {
+	setupInventoryTestDB(t)
+	response := httptest.NewRecorder()
+	reservations(response, httptest.NewRequest("POST", "/v1/reservations", strings.NewReader(`{"order_id":"ttl","items":[{"sku":"mug","quantity":2}]}`)))
+	var created reservation
+	_ = json.Unmarshal(response.Body.Bytes(), &created)
+	var available, lastError int
+	_ = db.QueryRow("SELECT available FROM stock WHERE sku='mug'").Scan(&available)
+	_ = db.QueryRow("SELECT COUNT(*) FROM audit_outbox WHERE aggregate_id=?", created.ID).Scan(&lastError)
+	if response.Code != 201 || available != 18 || lastError != 1 {
+		t.Fatalf("status=%d available=%d events=%d", response.Code, available, lastError)
+	}
+	// A reservation still within its TTL is untouched.
+	releaseExpiredReservations()
+	_ = db.QueryRow("SELECT available FROM stock WHERE sku='mug'").Scan(&available)
+	var status string
+	_ = db.QueryRow("SELECT status FROM reservations WHERE id=?", created.ID).Scan(&status)
+	if available != 18 || status != "reserved" {
+		t.Fatalf("premature sweep available=%d status=%s", available, status)
+	}
+	// Force expiry and sweep: stock comes back and the hold is closed.
+	_, _ = db.Exec("UPDATE reservations SET expires_at=? WHERE id=?", time.Now().Add(-time.Minute).UnixMilli(), created.ID)
+	releaseExpiredReservations()
+	var expiries int
+	_ = db.QueryRow("SELECT available FROM stock WHERE sku='mug'").Scan(&available)
+	_ = db.QueryRow("SELECT status FROM reservations WHERE id=?", created.ID).Scan(&status)
+	_ = db.QueryRow("SELECT COUNT(*) FROM audit_outbox WHERE aggregate_id=? AND action='expire'", created.ID).Scan(&expiries)
+	if available != 20 || status != "released" || expiries != 1 {
+		t.Fatalf("available=%d status=%s expiries=%d", available, status, expiries)
+	}
+	// A second sweep must not restore stock twice.
+	releaseExpiredReservations()
+	_ = db.QueryRow("SELECT available FROM stock WHERE sku='mug'").Scan(&available)
+	if available != 20 {
+		t.Fatalf("double release available=%d", available)
+	}
+}
+
+func TestNewReservationsCarryAnExpiry(t *testing.T) {
+	setupInventoryTestDB(t)
+	response := httptest.NewRecorder()
+	reservations(response, httptest.NewRequest("POST", "/v1/reservations", strings.NewReader(`{"order_id":"expiry","items":[{"sku":"mug","quantity":1}]}`)))
+	var expires int64
+	if err := db.QueryRow("SELECT expires_at FROM reservations WHERE order_id='expiry'").Scan(&expires); err != nil {
+		t.Fatal(err)
+	}
+	if expires <= time.Now().UnixMilli() {
+		t.Fatalf("expires_at=%d not in the future", expires)
 	}
 }
 

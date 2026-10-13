@@ -70,6 +70,7 @@ func main() {
 		log.Fatal(err)
 	}
 	go auditRelay(getenv("AUDIT_WORKER_URL", "https://localhost:8084"))
+	go reservationExpiryRelay()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", health)
 	mux.HandleFunc("/v1/audit/events", auditEvents)
@@ -94,12 +95,27 @@ func getenv(k, fallback string) string {
 	}
 	return fallback
 }
+
+// reservationTTL is how long a hold survives without being committed or
+// released. A paid order commits its reservation, which the sweeper ignores.
+func reservationTTL() int64 {
+	seconds, _ := strconv.Atoi(getenv("RESERVATION_TTL_SECONDS", "900"))
+	if seconds < 1 {
+		seconds = 1
+	}
+	return int64(seconds) * 1000
+}
 func initDB() error {
 	_, err := db.Exec(`PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS stock (sku TEXT PRIMARY KEY, available INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS reservations (id TEXT PRIMARY KEY, order_id TEXT NOT NULL, status TEXT NOT NULL, items_json TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS reservations (id TEXT PRIMARY KEY, order_id TEXT NOT NULL, status TEXT NOT NULL, items_json TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, expires_at INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS reservations_expiry ON reservations(status, expires_at);
 CREATE TABLE IF NOT EXISTS audit_outbox (event_id TEXT PRIMARY KEY,event_type TEXT NOT NULL,service TEXT NOT NULL,aggregate_type TEXT NOT NULL,aggregate_id TEXT NOT NULL,actor_id TEXT NOT NULL,correlation_id TEXT NOT NULL,action TEXT NOT NULL,status TEXT NOT NULL,before_json TEXT,after_json TEXT,occurred_at DATETIME NOT NULL,published_at TEXT,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT);`)
 	if err != nil {
+		return err
+	}
+	// Databases created before reservation expiry existed need the column added.
+	if _, err = db.Exec("ALTER TABLE reservations ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0"); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
 	var count int
@@ -187,7 +203,7 @@ func reservations(w http.ResponseWriter, r *http.Request) {
 	}
 	id := fmt.Sprintf("rsv_%d", time.Now().UnixNano())
 	raw, _ := json.Marshal(req.Items)
-	if _, err = tx.Exec("INSERT INTO reservations(id,order_id,status,items_json) VALUES(?,?,?,?)", id, req.OrderID, "reserved", string(raw)); err != nil {
+	if _, err = tx.Exec("INSERT INTO reservations(id,order_id,status,items_json,expires_at) VALUES(?,?,?,?,?)", id, req.OrderID, "reserved", string(raw), time.Now().UnixMilli()+reservationTTL()); err != nil {
 		_ = tx.Rollback()
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -278,6 +294,76 @@ func reservationAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]string{"reservation_id": id, "status": target})
+}
+
+// reservationExpiryRelay releases holds that were never committed or released
+// so abandoned checkouts cannot strand stock forever.
+func reservationExpiryRelay() {
+	releaseExpiredReservations()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		releaseExpiredReservations()
+	}
+}
+
+func releaseExpiredReservations() {
+	now := time.Now().UnixMilli()
+	rows, err := db.Query("SELECT id,items_json FROM reservations WHERE status='reserved' AND expires_at>0 AND expires_at<=? LIMIT 50", now)
+	if err != nil {
+		log.Printf("reservation expiry scan: %v", err)
+		return
+	}
+	type expired struct{ id, raw string }
+	list := []expired{}
+	for rows.Next() {
+		var item expired
+		if rows.Scan(&item.id, &item.raw) == nil {
+			list = append(list, item)
+		}
+	}
+	rows.Close()
+	for _, item := range list {
+		expireReservation(item.id, item.raw, now)
+	}
+}
+
+// expireReservation claims the reserved->released transition before restoring
+// stock, so a concurrent commit/release or a second sweep cannot double count.
+func expireReservation(id, raw string, now int64) {
+	tx, err := db.Begin()
+	if err != nil {
+		log.Printf("reservation expiry %s: %v", id, err)
+		return
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec("UPDATE reservations SET status='released' WHERE id=? AND status='reserved' AND expires_at>0 AND expires_at<=?", id, now)
+	if err != nil {
+		log.Printf("reservation expiry %s: %v", id, err)
+		return
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return
+	}
+	var items []Item
+	if err = json.Unmarshal([]byte(raw), &items); err != nil {
+		return
+	}
+	for _, item := range items {
+		if _, err = tx.Exec("UPDATE stock SET available = available + ? WHERE sku = ?", item.Quantity, item.SKU); err != nil {
+			return
+		}
+	}
+	request, _ := http.NewRequest(http.MethodPost, "/", nil)
+	request.Header.Set("X-Actor-ID", "system")
+	request.Header.Set("X-Correlation-ID", "reservation_ttl")
+	if err = recordAuditTx(tx, request, "inventory.released", "reservation", id, "expire", "success", map[string]any{"status": "reserved"}, map[string]any{"status": "released", "reason": "expired"}); err != nil {
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		log.Printf("reservation expiry %s: %v", id, err)
+	}
 }
 
 func recordAuditTx(tx *sql.Tx, r *http.Request, eventType, aggregateType, aggregateID, action, status string, before, after any) error {
