@@ -225,8 +225,8 @@ func reservationAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]string{"error": "not_found"})
 		return
 	}
-	var status, raw string
-	err := db.QueryRow("SELECT status,items_json FROM reservations WHERE id = ?", id).Scan(&status, &raw)
+	var status, raw, orderID string
+	err := db.QueryRow("SELECT status,items_json,order_id FROM reservations WHERE id = ?", id).Scan(&status, &raw, &orderID)
 	if err == sql.ErrNoRows {
 		writeJSON(w, 404, map[string]string{"error": "reservation_not_found"})
 		return
@@ -238,7 +238,7 @@ func reservationAction(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 1 && r.Method == http.MethodGet {
 		var items []Item
 		_ = json.Unmarshal([]byte(raw), &items)
-		writeJSON(w, 200, reservation{ID: id, Status: status, Items: items})
+		writeJSON(w, 200, reservation{ID: id, OrderID: orderID, Status: status, Items: items})
 		return
 	}
 	if r.Method != http.MethodPost || len(parts) != 2 {
@@ -251,9 +251,18 @@ func reservationAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, map[string]string{"error": "unknown_action"})
 		return
 	}
-	if status != "reserved" {
-		writeJSON(w, 409, map[string]string{"error": "reservation_not_active", "status": status})
-		return
+	if action == "commit" {
+		var body struct {
+			OrderID string `json:"order_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.OrderID == "" {
+			writeJSON(w, 400, map[string]string{"error": "order_id_required"})
+			return
+		}
+		if body.OrderID != orderID {
+			writeJSON(w, 409, map[string]string{"error": "reservation_order_mismatch"})
+			return
+		}
 	}
 	tx, err := db.Begin()
 	if err != nil {
@@ -262,16 +271,35 @@ func reservationAction(w http.ResponseWriter, r *http.Request) {
 	}
 	// Claim the transition before any inventory side effects. The predicate
 	// remains valid even if another request changed the pre-read status.
-	result, err := tx.Exec("UPDATE reservations SET status=? WHERE id=? AND status='reserved'", target, id)
+	defer tx.Rollback()
+	predicate := "UPDATE reservations SET status=? WHERE id=? AND status='reserved'"
+	args := []any{target, id}
+	if action == "commit" {
+		// Zero denotes legacy holds whose payment associations need migration.
+		predicate += " AND (expires_at=0 OR expires_at>?)"
+		args = append(args, time.Now().UnixMilli())
+	}
+	result, err := tx.Exec(predicate, args...)
 	if err != nil {
 		_ = tx.Rollback()
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 	changed, err := result.RowsAffected()
-	if err != nil || changed != 1 {
-		_ = tx.Rollback()
-		writeJSON(w, 409, map[string]string{"error": "reservation_not_active"})
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	if changed != 1 {
+		if err = tx.QueryRow("SELECT status FROM reservations WHERE id=?", id).Scan(&status); err != nil {
+			writeJSON(w, 500, map[string]string{"error": err.Error()})
+			return
+		}
+		if status == target {
+			writeJSON(w, 200, map[string]string{"reservation_id": id, "order_id": orderID, "status": target})
+			return
+		}
+		writeJSON(w, 409, map[string]string{"error": "reservation_not_active", "status": status})
 		return
 	}
 	if action == "release" {
@@ -295,7 +323,7 @@ func reservationAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, 200, map[string]string{"reservation_id": id, "status": target})
+	writeJSON(w, 200, map[string]string{"reservation_id": id, "order_id": orderID, "status": target})
 }
 
 // reservationExpiryRelay releases holds that were never committed or released

@@ -119,7 +119,7 @@ func TestConcurrentReservationTransitionsHaveOneWinner(t *testing.T) {
 				go func(action string) {
 					defer wg.Done()
 					response := httptest.NewRecorder()
-					reservationAction(response, httptest.NewRequest("POST", "/v1/reservations/"+created.ID+"/"+action, nil))
+					reservationAction(response, httptest.NewRequest("POST", "/v1/reservations/"+created.ID+"/"+action, strings.NewReader(`{"order_id":"race"}`)))
 					codes <- response.Code
 				}(action)
 			}
@@ -142,7 +142,11 @@ func TestConcurrentReservationTransitionsHaveOneWinner(t *testing.T) {
 			if status == "released" {
 				want = 20
 			}
-			if success != 1 || available != want || events != 2 {
+			wantSuccess := 32
+			if mixed {
+				wantSuccess = 16
+			}
+			if success != wantSuccess || available != want || events != 2 {
 				t.Fatalf("success=%d available=%d status=%s events=%d", success, available, status, events)
 			}
 		})
