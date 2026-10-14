@@ -46,7 +46,7 @@ func TestOrderWritesOutboxForCreateAndStatusChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	orderID := created["id"].(string)
-	statusRequest := ownedRequest("POST", "/v1/orders/"+orderID, strings.NewReader(`{"status":"paid"}`))
+	statusRequest := ownedRequest("POST", "/v1/orders/"+orderID, strings.NewReader(`{"status":"cancelled"}`))
 	statusRequest.Header.Set("X-Actor-ID", "test-user")
 	statusResponse := httptest.NewRecorder()
 	orderAction(statusResponse, statusRequest)
@@ -70,7 +70,7 @@ func TestRepeatedOrderStatusDoesNotDuplicateAudit(t *testing.T) {
 	_ = json.Unmarshal(created.Body.Bytes(), &result)
 	for i := 0; i < 2; i++ {
 		response := httptest.NewRecorder()
-		orderAction(response, ownedRequest("POST", "/v1/orders/"+result.ID, strings.NewReader(`{"status":"paid"}`)))
+		orderAction(response, ownedRequest("POST", "/v1/orders/"+result.ID, strings.NewReader(`{"status":"cancelled"}`)))
 		if response.Code != 200 {
 			t.Fatalf("status=%d", response.Code)
 		}

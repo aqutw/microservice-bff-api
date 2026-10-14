@@ -18,6 +18,7 @@ const catalog = [
 
 function json(res, status, body) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(body)); }
 function urlPath(req) { return new URL(req.url, 'http://localhost').pathname; }
+function checkoutReady(state) { return ['awaiting_payment', 'paid'].includes(state); }
 
 export async function checkout(input, variant, services = defaults, context = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw apiError('invalid_request', 400);
@@ -45,7 +46,7 @@ export async function checkout(input, variant, services = defaults, context = {}
 function formatCheckout(result, variant, normalized) {
   normalized ||= (result.order?.items || []).map(item => ({ ...item, unitPriceCents: catalog.find(product => product.sku === item.sku)?.unitPriceCents }));
   const cents = result.order?.total_cents ?? normalized.reduce((sum, item) => sum + item.quantity * item.unitPriceCents, 0);
-  if (!['awaiting_payment', 'paid'].includes(result.state)) return { checkoutId: result.checkout_id, state: result.state || 'processing' };
+  if (!checkoutReady(result.state)) return { checkoutId: result.checkout_id, state: result.state || 'processing', orderStatus: result.order?.status, paymentStatus: result.payment?.status };
   return variant === 'app'
     ? { checkoutId: result.checkout_id, orderId: result.order.id, state: result.state, amount: { cents: cents, currency: 'TWD' }, payment: { id: result.payment.id, clientToken: result.payment.client_token }, reservationId: result.inventory.reservation_id }
     : { checkoutId: result.checkout_id, state: result.state, order: { id: result.order.id, status: result.order.status, total: { cents: cents, currency: 'TWD' }, items: normalized }, payment: { id: result.payment.id, status: result.payment.status, redirectUrl: result.payment.checkout_url }, inventory: { reservationId: result.inventory.reservation_id, status: result.inventory.status } };
@@ -77,13 +78,13 @@ export function createServer(variant, services = defaults, security = {}) {
       }
       if (req.method === 'POST' && path === '/api/checkout') {
         const result = await checkout(await readBody(req), variant, services, { ...context, 'idempotency-key': req.headers['idempotency-key'] });
-        return json(res, result.state === 'processing' ? 202 : 201, result);
+        return json(res, checkoutReady(result.state) ? 201 : 202, result);
       }
       const checkoutMatch = path.match(/^\/api\/checkouts\/([^/]+)$/);
       if (req.method === 'GET' && checkoutMatch) {
         const result = await request(services.order, `/v1/checkouts/${encodeURIComponent(checkoutMatch[1])}`, { headers: context, service: 'order' });
         requireOwner(result.order?.user_id, identity);
-        return json(res, result.state === 'processing' ? 202 : 200, formatCheckout(result, variant));
+        return json(res, checkoutReady(result.state) ? 200 : 202, formatCheckout(result, variant));
       }
       const orderMatch = path.match(/^\/api\/orders\/([^/]+)$/);
       if (req.method === 'GET' && orderMatch) {
@@ -97,8 +98,11 @@ export function createServer(variant, services = defaults, security = {}) {
         const order = await request(services.order, `/v1/orders/${encodeURIComponent(reference.order_id)}`, { headers: context, service: 'order' });
         requireOwner(order.user_id, identity);
         const payment = await request(services.payment, `/v1/payments/${encodeURIComponent(paymentMatch[1])}/confirm`, { service: 'payment', method: 'POST', headers: context, body: '{}' });
-        await request(services.order, `/v1/orders/${encodeURIComponent(order.id)}`, { service: 'order', method: 'POST', headers: context, body: JSON.stringify({ status: 'paid' }) });
-        return json(res, 200, variant === 'app' ? { paymentId: payment.id, state: 'paid', orderId: payment.order_id } : { payment, orderStatus: 'paid' });
+        const settlement = await request(services.order, `/v1/orders/${encodeURIComponent(order.id)}/settlement`, { service: 'order', method: 'POST', headers: context, body: '{}' });
+        const status = settlement.state === 'paid' ? 200 : 202;
+        return json(res, status, variant === 'app'
+          ? { paymentId: payment.id, state: settlement.state, orderId: payment.order_id, checkoutId: settlement.checkout_id }
+          : { payment, state: settlement.state, orderStatus: settlement.order_status, checkoutId: settlement.checkout_id });
       }
       return json(res, 404, { error: 'not_found' });
     } catch (error) { json(res, error.status || 502, { error: error.message || 'bff_error', details: error.body }); }

@@ -227,7 +227,7 @@ func TestPaidOrderCommitsReservation(t *testing.T) {
 		defer mu.Unlock()
 		if strings.HasSuffix(r.URL.Path, "/commit") {
 			state, committed = "committed", committed+1
-			write(w, 200, map[string]string{"reservation_id": "r1", "status": "committed"})
+			write(w, 200, map[string]string{"reservation_id": "r1", "order_id": jobForTest(t).Result.Order.ID, "status": "committed"})
 			return
 		}
 		if r.Method == http.MethodGet {
@@ -318,7 +318,11 @@ func TestPaidPaymentReconcilesWithoutClientRetry(t *testing.T) {
 	setupOrderTestDB(t)
 	var paid atomic.Bool
 	inventory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		write(w, 201, map[string]string{"reservation_id": "r1", "status": "reserved"})
+		status := "reserved"
+		if strings.HasSuffix(r.URL.Path, "/commit") {
+			status = "committed"
+		}
+		write(w, 200, map[string]string{"reservation_id": "r1", "order_id": jobForTest(t).Result.Order.ID, "status": status})
 	}))
 	defer inventory.Close()
 	payment := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

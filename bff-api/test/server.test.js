@@ -64,8 +64,10 @@ test('confirm can repair Order after Payment already committed', async () => {
  globalThis.fetch = async (url, options) => {
   if (options?.method !== 'POST' && url.includes('/v1/orders/')) return response({id:'o1',user_id:'user-1'});
   if (url.includes('/v1/payments/')) return response({id:'p1',order_id:'o1',status:'paid'});
+  assert.equal(url,'https://order/v1/orders/o1/settlement');
+  assert.deepEqual(JSON.parse(options.body),{});
   orderAttempts++;
-  return orderAttempts === 1 ? response({error:'unavailable'},503) : response({order_id:'o1',status:'paid'});
+  return orderAttempts === 1 ? response({error:'unavailable'},503) : response({checkout_id:'c1',state:'paid',order_status:'paid'});
  };
  const handler = server('desktop',{payment:'https://payment',order:'https://order'});
  const req = {method:'POST',url:'/api/payments/p1/confirm',headers:{}};
@@ -89,4 +91,17 @@ test('ready status uses the same frontend contract as checkout', async () => {
   if (variant === 'desktop') assert.equal(result.body.inventory.reservationId,'rsv-1');
   else assert.equal(result.body.payment.clientToken,'token-1');
  }
+});
+
+for (const variant of ['desktop','app']) test(`${variant} payment confirmation does not report paid before settlement`,async()=>{
+ globalThis.fetch=async(url,options)=>{
+  if(url.endsWith('/settlement')) return response({checkout_id:'c1',state:'settling',order_status:'settling'},202);
+  if(url.includes('/v1/orders/')) { assert.notEqual(options?.method,'POST');return response({id:'o1',user_id:'user-1'}); }
+  return response({id:'p1',order_id:'o1',status:'paid'});
+ };
+ const result=await invoke(server(variant,{payment:'https://payment',order:'https://order'}),{method:'POST',url:'/api/payments/p1/confirm',headers:{}});
+ assert.equal(result.status,202);
+ assert.equal(result.body.state,'settling');
+ assert.equal(result.body.checkoutId,'c1');
+ if(variant==='desktop') assert.equal(result.body.orderStatus,'settling');
 });

@@ -160,6 +160,10 @@ func orders(w http.ResponseWriter, r *http.Request) {
 }
 func orderAction(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/v1/orders/")
+	if strings.HasSuffix(id, "/settlement") {
+		settleOrder(w, r, strings.TrimSuffix(id, "/settlement"))
+		return
+	}
 	if id == "" {
 		write(w, 404, map[string]string{"error": "not_found"})
 		return
@@ -194,6 +198,10 @@ func orderAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Status == "" {
 		write(w, 400, map[string]string{"error": "invalid_request"})
+		return
+	}
+	if body.Status == "paid" {
+		write(w, 409, map[string]string{"error": "settlement_required"})
 		return
 	}
 	allowed := map[string]bool{"pending_payment": true, "paid": true, "cancelled": true, "shipped": true}
