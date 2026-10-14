@@ -393,7 +393,8 @@ func releaseInventoryReservation(job checkoutJob, id string) error {
 	if id == "" {
 		return nil
 	}
-	if _, err := callCheckout(job, env("INVENTORY_API_URL", "https://localhost:8082"), "/v1/reservations/"+id+"/release", nil); err != nil {
+	body, err := callCheckout(job, env("INVENTORY_API_URL", "https://localhost:8082"), "/v1/reservations/"+id+"/release", nil)
+	if err != nil {
 		var failure upstreamFailure
 		if !errors.As(err, &failure) || failure.status != 409 {
 			return err
@@ -405,6 +406,15 @@ func releaseInventoryReservation(job checkoutJob, id string) error {
 		if status != "released" && status != "expired" {
 			return err
 		}
+		return nil
+	}
+	var released struct {
+		ID      string `json:"reservation_id"`
+		OrderID string `json:"order_id"`
+		Status  string `json:"status"`
+	}
+	if json.Unmarshal(body, &released) != nil || released.ID != id || released.OrderID != job.Result.Order.ID || released.Status != "released" {
+		return fmt.Errorf("invalid_reservation_release_response")
 	}
 	return nil
 }
@@ -455,13 +465,14 @@ func inventoryReservationStatus(job checkoutJob, id string) (string, error) {
 		return "", fmt.Errorf("reservation_lookup_status_%d", response.StatusCode)
 	}
 	var existing struct {
+		ID      string `json:"reservation_id"`
 		Status  string `json:"status"`
 		OrderID string `json:"order_id"`
 	}
 	if err = json.NewDecoder(io.LimitReader(response.Body, 1024*1024)).Decode(&existing); err != nil {
 		return "", err
 	}
-	if existing.OrderID != job.Result.Order.ID {
+	if existing.ID != id || existing.OrderID != job.Result.Order.ID {
 		return "", fmt.Errorf("reservation_order_mismatch")
 	}
 	return existing.Status, nil
@@ -483,7 +494,7 @@ func compensateCheckout(job *checkoutJob) error {
 				return callErr
 			}
 			var result paymentView
-			if json.Unmarshal(body, &result) != nil || result.ID != payment.ID || result.OrderID != job.Result.Order.ID || result.Status != "cancelled" {
+			if json.Unmarshal(body, &result) != nil || result.ID != payment.ID || result.OrderID != job.Result.Order.ID || result.Status != "cancelled" || result.Amount != payment.Amount || result.Currency != payment.Currency {
 				return fmt.Errorf("invalid_payment_cancel_response")
 			}
 			payment.Status = "cancelled"

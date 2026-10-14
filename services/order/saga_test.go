@@ -128,7 +128,7 @@ func TestCompensationFailureRemainsDurableAndRetries(t *testing.T) {
 				write(w, 503, map[string]string{"error": "unavailable"})
 				return
 			}
-			write(w, 200, map[string]string{"status": "released"})
+			write(w, 200, map[string]string{"reservation_id": "r1", "order_id": jobForTest(t).Result.Order.ID, "status": "released"})
 			return
 		}
 		write(w, 201, map[string]string{"reservation_id": "r1", "status": "reserved"})

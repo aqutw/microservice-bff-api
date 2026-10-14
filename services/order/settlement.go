@@ -242,7 +242,7 @@ func refundCheckout(job *checkoutJob) error {
 			return callErr
 		}
 		var result paymentView
-		if json.Unmarshal(body, &result) != nil || result.ID != payment.ID || result.OrderID != job.Result.Order.ID || result.Status != "refunded" {
+		if json.Unmarshal(body, &result) != nil || result.ID != payment.ID || result.OrderID != job.Result.Order.ID || result.Status != "refunded" || result.Amount != payment.Amount || result.Currency != payment.Currency {
 			return fmt.Errorf("invalid_refund_response")
 		}
 	}
