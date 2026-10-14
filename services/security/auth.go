@@ -240,7 +240,9 @@ func Allowed(service, caller string, r *http.Request) bool {
 	case "inventory":
 		return caller == "order" && ((r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/stock/")) || ((r.Method == "GET" || r.Method == "POST") && (r.URL.Path == "/v1/reservations" || strings.HasPrefix(r.URL.Path, "/v1/reservations/"))))
 	case "payment":
-		return (caller == "order" && ((r.Method == "POST" && r.URL.Path == "/v1/payments") || (r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/payments/")))) || (bff && ((r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/payments/")) || (r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/confirm"))))
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/payments/"), "/")
+		compensation := r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/v1/payments/") && len(parts) == 2 && parts[0] != "" && (parts[1] == "cancel" || parts[1] == "refund")
+		return (caller == "order" && (compensation || (r.Method == "POST" && r.URL.Path == "/v1/payments") || (r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/payments/")))) || (bff && ((r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/v1/payments/")) || (r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/confirm"))))
 	}
 	return false
 }

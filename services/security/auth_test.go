@@ -108,6 +108,18 @@ func TestPermissionsAreSpecificToServiceAndOperation(t *testing.T) {
 		t.Fatal("audit scope permission")
 	}
 }
+
+func TestOnlyOrderCanCompensatePayments(t *testing.T) {
+	for _, action := range []string{"cancel", "refund"} {
+		for _, caller := range []string{"order", "desktop-bff", "app-bff", "inventory"} {
+			r := httptest.NewRequest("POST", "/v1/payments/p/"+action, nil)
+			r.Header.Set("X-Actor-ID", "usr_alice")
+			if got := Allowed("payment", caller, r); got != (caller == "order") {
+				t.Fatalf("%s %s allowed=%v", caller, action, got)
+			}
+		}
+	}
+}
 func ioReader(value string) *readerCloser { return &readerCloser{strings.NewReader(value)} }
 
 type readerCloser struct{ *strings.Reader }

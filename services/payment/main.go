@@ -187,7 +187,18 @@ func paymentAction(w http.ResponseWriter, r *http.Request) {
 		write(w, 200, p)
 		return
 	}
-	if r.Method != http.MethodPost || len(parts) != 2 || parts[1] != "confirm" {
+	if r.Method != http.MethodPost || len(parts) != 2 {
+		write(w, 405, map[string]string{"error": "method_not_allowed"})
+		return
+	}
+	type transition struct{ from, to, event string }
+	action := parts[1]
+	change, allowed := map[string]transition{
+		"confirm": {"pending", "paid", "payment.confirmed"},
+		"cancel":  {"pending", "cancelled", "payment.cancelled"},
+		"refund":  {"paid", "refunded", "payment.refunded"},
+	}[action]
+	if !allowed {
 		write(w, 405, map[string]string{"error": "method_not_allowed"})
 		return
 	}
@@ -196,7 +207,8 @@ func paymentAction(w http.ResponseWriter, r *http.Request) {
 		write(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
-	result, err := tx.Exec("UPDATE payments SET status='paid' WHERE id=? AND status='pending'", id)
+	defer tx.Rollback()
+	result, err := tx.Exec("UPDATE payments SET status=? WHERE id=? AND status=?", change.to, id, change.from)
 	if err != nil {
 		_ = tx.Rollback()
 		write(w, 500, map[string]string{"error": err.Error()})
@@ -215,15 +227,15 @@ func paymentAction(w http.ResponseWriter, r *http.Request) {
 			write(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
-		if p.Status == "paid" {
+		if p.Status == change.to {
 			write(w, 200, p)
 			return
 		}
-		write(w, 409, map[string]string{"error": "payment_not_pending", "status": p.Status})
+		write(w, 409, map[string]string{"error": "payment_transition_conflict", "status": p.Status})
 		return
 	}
-	p.Status = "paid"
-	if err = recordAuditTx(tx, r, "payment.confirmed", "payment", id, "confirm", "success", map[string]any{"status": "pending"}, map[string]any{"status": "paid", "order_id": p.OrderID}); err != nil {
+	p.Status = change.to
+	if err = recordAuditTx(tx, r, change.event, "payment", id, action, "success", map[string]any{"status": change.from}, map[string]any{"status": change.to, "order_id": p.OrderID}); err != nil {
 		_ = tx.Rollback()
 		write(w, 500, map[string]string{"error": err.Error()})
 		return
