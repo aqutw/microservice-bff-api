@@ -21,7 +21,21 @@ jobs:
           cache: false
       - name: Test ${{ matrix.service }}
         working-directory: services/${{ matrix.service }}
-        run: go test -race ./...
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/coverage"
+          set -o pipefail
+          go test -race -covermode=atomic -coverprofile="$GITHUB_WORKSPACE/artifacts/coverage/${{ matrix.service }}.out" ./... 2>&1 | tee "$GITHUB_WORKSPACE/artifacts/coverage/${{ matrix.service }}.log"
+          go tool cover -func="$GITHUB_WORKSPACE/artifacts/coverage/${{ matrix.service }}.out" | tee "$GITHUB_WORKSPACE/artifacts/coverage/${{ matrix.service }}-summary.txt"
+      - name: Upload Go coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-go-${{ matrix.service }}-${{ github.run_attempt }}
+          path: |
+            artifacts/coverage/${{ matrix.service }}.out
+            artifacts/coverage/${{ matrix.service }}.log
+            artifacts/coverage/${{ matrix.service }}-summary.txt
+          retention-days: 7
 
   settlement-sit:
     runs-on: ubuntu-latest
@@ -58,9 +72,20 @@ jobs:
         with:
           node-version: '22'
       - run: npm ci --ignore-scripts
-      - run: npm test
+      - name: Test BFF with coverage
+        run: |
+          mkdir -p ../artifacts/coverage
+          set -o pipefail
+          npm test -- --experimental-test-coverage --test-coverage-include='src/**' 2>&1 | tee ../artifacts/coverage/bff.log
       - run: node --test ../loadtest/commerce.test.mjs
       - run: node --test ../scripts/test/sit-report.test.mjs
+      - name: Upload BFF coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-bff-${{ github.run_attempt }}
+          path: artifacts/coverage/bff.log
+          retention-days: 7
 
   website-build:
     runs-on: ubuntu-latest
@@ -75,5 +100,16 @@ jobs:
           cache: npm
           cache-dependency-path: website/package-lock.json
       - run: npm ci --ignore-scripts
-      - run: npm test
+      - name: Test website libraries with coverage
+        run: |
+          mkdir -p ../artifacts/coverage
+          set -o pipefail
+          npm test -- --experimental-test-coverage --test-coverage-include='lib/**' 2>&1 | tee ../artifacts/coverage/website.log
       - run: npm run build
+      - name: Upload website coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-website-${{ github.run_attempt }}
+          path: artifacts/coverage/website.log
+          retention-days: 7

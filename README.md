@@ -183,6 +183,24 @@ audit outages, restarts, outbox replay and inventory rejection. These scripts st
 and restart services in the selected project. For nondefault files/ports configure
 `SECURITY_ENV_FILE`, the service URL variables and Compose environment accordingly.
 
+Unit and SIT workflows also run on `loadtest-*` branches. CI publishes atomic Go
+statement coverage with race detection, plus Node.js line/branch/function coverage
+for BFF `src/` and website `lib/`. These are unit-test reports; Docker and settlement
+SIT results are reported separately, and the website page/route files are outside
+the library report. No unmeasured coverage percentage or arbitrary threshold is used.
+To reproduce the coverage reports locally:
+
+```bash
+mkdir -p artifacts/coverage
+for service in order inventory payment audit-worker security; do
+  (cd services/$service &&
+    go test -race -covermode=atomic -coverprofile=../../artifacts/coverage/$service.out ./... &&
+    go tool cover -func=../../artifacts/coverage/$service.out > ../../artifacts/coverage/$service-summary.txt) || break
+done
+npm test --prefix bff-api -- --experimental-test-coverage --test-coverage-include='src/**'
+npm test --prefix website -- --experimental-test-coverage --test-coverage-include='lib/**'
+```
+
 Authenticated load tests require a fresh project to preserve seed stock:
 
 ```bash
