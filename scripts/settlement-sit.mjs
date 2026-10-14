@@ -89,7 +89,7 @@ async function run(workspace) {
    const fault = req.method !== 'POST' ? null : req.url === '/v1/reservations' ? 'reserve' : req.url === '/v1/payments' ? 'create_payment' :
     ['commit', 'refund', 'cancel', 'release'].find(action => req.url.endsWith(`/${action}`));
    // Hold reconciliation until each lost-response assertion has observed the durable intermediate state.
-   if ((fault && faults[fault] === 'fail') || (target === 'payment' && ['refund', 'cancel', 'create_payment'].some(action => faults[action] === 'fail') && req.method === 'GET')) {
+   if ((fault && ['fail', 'outage'].includes(faults[fault])) || (target === 'payment' && ['refund', 'cancel', 'create_payment'].some(action => faults[action] === 'fail') && req.method === 'GET')) {
     res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":"injected_outage"}'); return;
    }
    const upstream = https.request(urls[target] + req.url, { method: req.method, headers: req.headers, ca }, response => {
@@ -277,6 +277,33 @@ async function run(workspace) {
    console.log(`PASS: ${interruption} during RPC recovers after real lease expiry without stale writes or duplicate sale/audit`);
   }
 
+  const beforeRestart = (await internal('inventory', 'order', '/v1/stock/mug')).body.available;
+  const inventoryRestart = await checkout('inventory-process-restart');
+  await stop('inventory');
+  assert.equal((await api(`/api/payments/${inventoryRestart.payment.id}/confirm`, 'POST', {})).status, 202);
+  await idleStage(inventoryRestart, 'settling');
+  assert.deepEqual(sql('inventory', 'SELECT status FROM reservations WHERE id=?', [inventoryRestart.inventory.reservationId]), [['reserved']]);
+  await start('inventory'); await paid(inventoryRestart);
+  assert.equal((await internal('inventory', 'order', '/v1/stock/mug')).body.available, beforeRestart - 1);
+  assert.equal(sql('inventory', "SELECT count(*) FROM audit_outbox WHERE aggregate_id=? AND event_type='inventory.committed'", [inventoryRestart.inventory.reservationId])[0][0], 1);
+  console.log('PASS: Inventory process restart preserves the hold and completes one sale and audit event');
+
+  const beforeRefundRestart = (await internal('inventory', 'order', '/v1/stock/mug')).body.available;
+  const paymentRestart = await checkout('payment-process-restart');
+  sql('inventory', 'UPDATE reservations SET expires_at=? WHERE id=?', [Date.now() - 1000, paymentRestart.inventory.reservationId]);
+  // Block only the refund mutation first, so Order can still establish that Payment is paid.
+  faults.refund = 'outage';
+  assert.equal((await api(`/api/payments/${paymentRestart.payment.id}/confirm`, 'POST', {})).status, 202);
+  await idleStage(paymentRestart, 'refund_pending');
+  const attempts = sql('order', 'SELECT attempts FROM checkouts WHERE id=?', [paymentRestart.checkoutId])[0][0];
+  await stop('payment'); faults.refund = '';
+  await waitFor(() => sql('order', 'SELECT stage,attempts FROM checkouts WHERE id=?', [paymentRestart.checkoutId]).some(([stage, count]) => stage === 'refund_pending' && count > attempts), 'refund did not remain pending while Payment was stopped');
+  assert.deepEqual(sql('payment', 'SELECT status FROM payments WHERE id=?', [paymentRestart.payment.id]), [['paid']]);
+  await start('payment'); await cancelled(paymentRestart, 'refunded');
+  assert.equal((await internal('inventory', 'order', '/v1/stock/mug')).body.available, beforeRefundRestart);
+  assert.equal(sql('payment', "SELECT count(*) FROM audit_outbox WHERE aggregate_id=? AND event_type='payment.refunded'", [paymentRestart.payment.id])[0][0], 1);
+  console.log('PASS: Payment process restart preserves refund_pending and completes one refund without stock drift');
+
   // Exercise the actual App process and its separate service credentials. Domain faults remain shared above.
   const jose=await import(createRequire(new URL('../bff-api/package.json',import.meta.url)).resolve('jose'));
   const {publicKey,privateKey}=await jose.generateKeyPair('RS256');
@@ -324,7 +351,7 @@ async function run(workspace) {
   const appRefunded=await appApi(`/api/payments/${appRefund.payment.id}/confirm`,'POST',{});assert.ok([202,409].includes(appRefunded.status));
   await waitFor(async()=> (await appApi(`/api/orders/${appRefund.orderId}`)).body.status==='cancelled','App refund incomplete');
   assert.equal((await internal('payment','order',`/v1/payments/${appRefund.payment.id}`)).body.status,'refunded');
-  assert.equal((await internal('inventory','order','/v1/stock/mug')).body.available,12);
+  assert.equal((await internal('inventory','order','/v1/stock/mug')).body.available,11);
   console.log('PASS: actual App BFF credentials, JWT, channel contract, 202 settlement, cancellation and refund');
   console.log('Settlement SIT passed');
  } finally {
