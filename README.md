@@ -94,6 +94,34 @@ The same key used by another owner creates a separate workflow.
 Use `GET /api/orders/{id}` to read an owned order and
 `POST /api/payments/{id}/confirm` to confirm an owned **simulated** payment.
 Production settlement requires an authenticated payment-provider integration.
+Payment confirmation returns `200` only when Order has also committed Inventory.
+It can return `202` with `checkoutId` and `state=settling` while recovery continues;
+poll `/api/checkouts/{id}` until `paid`. Payment's `paid` fact alone does not permit
+fulfillment. `settling`, `cancelling` and `refund_pending` are non-fulfillable states.
+
+Order owns the settlement workflow. The BFF triggers
+`POST /v1/orders/{id}/settlement`; generic Order updates reject `status=paid`.
+Inventory commit requires `{ "order_id": "..." }`, checks the deadline atomically,
+and treats repeated commits as success without duplicate stock or audit effects.
+Order publishes `paid`, its checkout snapshot and audit event in one local transaction.
+Lost responses retain a durable stage and fixed operation key until resolved.
+
+`POST /api/orders/{id}/cancel` returns `200` when compensation completes, or `202`
+with `checkoutId` while it continues. Cancellation competes with settlement through
+Order's conditional status update; an order already settling or paid returns `409`.
+If payment confirmation wins before cancellation, Order uses the **simulated**
+Payment refund operation before completing cancellation. Expired paid holds likewise
+enter `refund_pending`; provider refunds must be implemented before using real money.
+Only Order may call Payment `/cancel` and `/refund`. A cancelled checkout read returns
+`409` with its reason. Clients should not retry checkout creation with a new key while
+an existing workflow is still settling or compensating.
+
+On upgrade, old `paid` orders whose checkouts still await payment reconciliation are
+quarantined as `settling` before the listener starts and verified through recovery.
+Already shipped legacy orders require explicit operational reconciliation. Inventory
+holds created before TTL support keep `expires_at=0`; they are not automatically
+released, because some belong to sales that the old version never committed.
+
 `GET /api/audit/events` accepts service, event_type, aggregate_id, actor_id,
 correlation_id and limit filters, and requires audit permission.
 
@@ -109,11 +137,20 @@ npm ci --prefix website --ignore-scripts
 npm test --prefix bff-api
 npm test --prefix website
 node --test loadtest/commerce.test.mjs
+node scripts/settlement-sit.mjs
 npm run build --prefix website
 for service in security order inventory payment audit-worker; do
   (cd services/$service && go test -race ./...) || break
 done
 ```
+
+Settlement SIT builds the real Go domain services and runs the BFF with a test
+identity against newly generated TLS certificates, signing keys and temporary
+databases. It injects lost commit/refund responses and outages, restarts Order,
+checks cancellation races, and verifies final stock and audit counts. It needs
+Go, Node.js 22+, OpenSSL and Python 3; no Docker or existing credentials are used.
+Successful runs clean up their processes and temporary files; failed runs retain
+isolated diagnostics. Real OIDC remains covered by Security SIT below.
 
 Run integration checks against a dedicated Compose project with fresh volumes:
 
@@ -142,8 +179,8 @@ docker run --rm --network host --env-file .security/tokens.env \
 
 `--network host` is intended for Linux/CI. On desktop Docker, provide reachable
 service URLs. Load tests check 15 Desktop and 6 App completed transactions,
-scenario-specific zero failures and latency thresholds. The inventory signing key
-is test-driver access to an internal operation; never expose it to an App/browser.
+scenario-specific zero failures and latency thresholds. Load clients use public
+BFF APIs and wait for Order settlement; they do not receive an inventory signing key.
 CI preserves diagnostics and removes its own test containers and volumes.
 
 ## Kubernetes

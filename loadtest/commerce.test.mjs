@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
-import { createHash, createHmac, randomBytes } from 'node:crypto';
 import test from 'node:test';
 
 function load(post, get) {
@@ -13,7 +12,7 @@ function load(post, get) {
   const source = readFileSync(new URL('./commerce.js', import.meta.url), 'utf8')
     .replace(/^import .*;$/gm, '').replace(/export /g, '');
   const context = vm.createContext({
-    __ENV: {INVENTORY_SERVICE_KEY:Buffer.alloc(32,5).toString('base64url')}, Uint8Array, crypto: {randomBytes, sha256:(value)=>createHash('sha256').update(value).digest('hex'), hmac:(_,key,value)=>createHmac('sha256',key).update(value).digest('hex')}, encoding:{b64decode:value=>Buffer.from(value,'base64url')}, __VU: 1, __ITER: 0, Counter: Metric, Rate: Metric,
+    __ENV: {}, __VU: 1, __ITER: 0, Counter: Metric, Rate: Metric,
     http: { post, get }, sleep() {},
     check: (response, checks) => Object.values(checks).every(fn => fn(response))
   });
@@ -32,34 +31,27 @@ test('every failed checkout contributes a failed transaction despite successful 
   assert.equal(run.thresholds.app_transactions_completed[0], 'rate==1');
 });
 
-test('payment success cannot hide a failed inventory commit', () => {
-  const run = load(url => ({ status: url.includes('/commit') ? 500 : url.includes('/confirm') ? 200 : 201,
-    json: () => ({ payment: { id: 'p', status: 'paid' }, inventory: { reservationId: 'r' } }) }));
+test('payment success cannot hide unfinished order settlement', () => {
+  const run = load(url => ({ status: url.includes('/confirm') ? 200 : 201,
+    json: () => ({ payment: { id: 'p', status: 'paid' }, inventory: { reservationId: 'r' }, state:'settling',orderStatus:'settling' }) }));
   run.scenarios.desktopCheckout();
   assert.deepEqual(run.metrics.desktop_transactions_completed, [false]);
 });
 
-test('a pending checkout is polled before confirming and committing', () => {
+test('pending checkout and settlement are polled before counting completion', () => {
  let polls = 0;
- const run = load(url => ({status: url.includes('/confirm') || url.includes('/commit') ? 200 : 202,
-  json: () => url.includes('/confirm') ? {payment:{status:'paid'}} : url.includes('/commit') ? {status:'committed'} : {checkoutId:'c1',state:'processing'}}),
-  () => { polls++; return {status:200,json:()=>({payment:{id:'p1'},inventory:{reservationId:'r1'}})}; });
+ const run = load(url => ({status:202,json:()=>({checkoutId:'c1',state:url.includes('/confirm')?'settling':'processing'})}),
+  () => { polls++; return {status:200,json:()=>({payment:{id:'p1',status:'paid'},inventory:{reservationId:'r1',status:'committed'},state:polls===1?'awaiting_payment':'paid',order:{status:'paid'}})}; });
  run.scenarios.desktopCheckout();
- assert.equal(polls,1);
+ assert.equal(polls,2);
  assert.deepEqual(run.metrics.desktop_transactions_completed,[true]);
 });
 
-test('internal inventory calls are authenticated with a recipient-bound signature', () => {
- let committed = false;
- const run = load((url,body,options) => {
-  if (url.includes('/commit')) {
-   const h = options.headers;
-   assert.equal(h['Authorization'],undefined);assert.equal(h['X-Service-ID'],'order');
-   const canonical = ['POST','/v1/reservations/r/commit',createHash('sha256').update('').digest('hex'),'order','inventory',h['X-Service-Time'],h['X-Service-Nonce'],'',h['X-Correlation-ID'],'',''].join('\n');
-   assert.equal(h['X-Service-Signature'],createHmac('sha256',Buffer.alloc(32,5)).update(canonical).digest('hex'));
-   committed = true;
-  }
-  return {status:url.includes('/confirm') || url.includes('/commit') ? 200 : 201,json:()=>({payment:{id:'p',status:'paid'},inventory:{reservationId:'r'},status:'committed'})};
+test('load clients only use public BFF APIs and never commit inventory directly', () => {
+ const run = load((url) => {
+  assert.ok(!url.includes('/v1/'));
+  return {status:url.includes('/confirm')?200:201,json:()=>({payment:{id:'p',status:'paid'},inventory:{reservationId:'r'},state:'paid',orderStatus:'paid'})};
  });
- run.scenarios.desktopCheckout();assert.equal(committed,true);
+ run.scenarios.desktopCheckout();
+ assert.deepEqual(run.metrics.desktop_transactions_completed,[true]);
 });

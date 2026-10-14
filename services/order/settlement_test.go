@@ -208,3 +208,55 @@ func TestPaidStatusRequiresOwnedSettlementWorkflow(t *testing.T) {
 		t.Fatalf("settlement=%d %s", w.Code, w.Body)
 	}
 }
+
+func TestUpgradePreviouslyPaidWorkflowVerifiesInventoryBeforeServingPaid(t *testing.T) {
+	f := setupSettlementFixture(t, "")
+	job := jobForTest(t)
+	if _, err := db.Exec("UPDATE orders SET status='paid' WHERE id=?", job.Result.Order.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := initDB(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var status string
+	db.QueryRow("SELECT status FROM orders WHERE id=?", job.Result.Order.ID).Scan(&status)
+	job = jobForTest(t)
+	if status != "settling" || job.Result.State != "settling" {
+		t.Fatalf("legacy order=%s snapshot=%s", status, job.Result.State)
+	}
+	job = recoverSettlementForTest(t)
+	var migrations int
+	db.QueryRow("SELECT count(*) FROM audit_outbox WHERE event_type='order.settlement_recovering'").Scan(&migrations)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if job.Stage != "paid" || f.inventory != "committed" || migrations != 1 {
+		t.Fatalf("stage=%s inventory=%s migrations=%d", job.Stage, f.inventory, migrations)
+	}
+}
+
+func TestLostLeaseCannotPublishPaidOrDuplicateAudit(t *testing.T) {
+	setupSettlementFixture(t, "")
+	old := jobForTest(t)
+	if err := reconcilePayment(&old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE checkouts SET lease_until=42 WHERE id=?", old.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := settleInventory(&old); err == nil {
+		t.Fatal("stale worker published paid")
+	}
+	var status string
+	db.QueryRow("SELECT status FROM orders WHERE id=?", old.Result.Order.ID).Scan(&status)
+	if status != "settling" {
+		t.Fatalf("stale worker changed order=%s", status)
+	}
+	job := recoverSettlementForTest(t)
+	var events int
+	db.QueryRow("SELECT count(*) FROM audit_outbox WHERE event_type='order.status_changed'").Scan(&events)
+	if job.Stage != "paid" || events != 1 {
+		t.Fatalf("stage=%s paid events=%d", job.Stage, events)
+	}
+}

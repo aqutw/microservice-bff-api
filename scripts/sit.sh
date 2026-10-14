@@ -70,6 +70,21 @@ call() {
     done
     if [[ "$expected" == 201 && "$status" == 200 ]]; then status=201; fi
   fi
+  if [[ "$status" == 202 && "$expected" == 200 && "$url" == */confirm ]]; then
+    local checkout_id poll_base
+    checkout_id=$(jq -er .checkoutId "$artifacts_dir/$label.json")
+    poll_base=${url%%/api/payments/*}
+    cp "$artifacts_dir/$label.json" "$artifacts_dir/$label-accepted.json"
+    for attempt in {1..90}; do
+      status=$(curl --silent --show-error --header "authorization: Bearer $SIT_TOKEN" --max-time 5 --output "$artifacts_dir/$label.json" --write-out '%{http_code}' "$poll_base/api/checkouts/$checkout_id")
+      [[ "$status" != 202 ]] && break
+      sleep 1
+    done
+    if [[ "$status" == 200 ]]; then
+      jq '. + {orderStatus: (.order.status // .state)}' "$artifacts_dir/$label.json" > "$artifacts_dir/$label-settled.json"
+      mv "$artifacts_dir/$label-settled.json" "$artifacts_dir/$label.json"
+    fi
+  fi
   [[ "$status" == "$expected" ]] || fail "$label returned $status, expected $expected (see $label.json)"
 }
 
@@ -119,7 +134,7 @@ call 200 desktop-order GET "${DESKTOP_BFF_URL}/api/orders/$order_id" "$correlati
 assert_json desktop-order '.status == "paid" and .total_cents == 650'
 call 200 duplicate-confirm POST "${DESKTOP_BFF_URL}/api/payments/$payment_id/confirm" "$correlation"
 assert_json duplicate-confirm '.payment.status == "paid" and .orderStatus == "paid"'
-call 200 desktop-commit POST "${INVENTORY_API_URL}/v1/reservations/$reservation_id/commit" "$correlation"
+call 200 desktop-commit POST "${INVENTORY_API_URL}/v1/reservations/$reservation_id/commit" "$correlation" "{\"order_id\":\"$order_id\"}"
 assert_json desktop-commit '.status == "committed"'
 wait_audit "$correlation" 6 desktop-audit
 assert_json desktop-audit '([.events[].service] | unique | sort) == ["inventory","order","payment"] and all(.events[]; (.actor_id | startswith("usr_")))'
@@ -132,7 +147,7 @@ assert_json app '.state == "awaiting_payment" and .amount.cents == 280 and (.pay
 payment_id=$(jq -er .payment.id "$artifacts_dir/app.json")
 call 200 app-confirm POST "${APP_BFF_URL}/api/payments/$payment_id/confirm" "$correlation"
 assert_json app-confirm '.state == "paid"'
-wait_audit "$correlation" 5 app-audit
+wait_audit "$correlation" 6 app-audit
 pass 'App checkout and native payment contract'
 
 before=$(stock mug)

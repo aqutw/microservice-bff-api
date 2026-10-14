@@ -20,6 +20,5 @@ for (const user of ['alice', 'bob', 'auditor']) {
 }
 values.SIT_TOKEN = values.AUDITOR_TOKEN; values.SIT_ACTOR = values.AUDITOR_ACTOR;
 values.ACCESS_TOKEN = values.AUDITOR_TOKEN;
-values.INVENTORY_SERVICE_KEY = JSON.parse(process.env.ORDER_OUTGOING_KEYS).inventory;
 writeFileSync('.security/tokens.env', Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n') + '\n', { mode: 0o600 });
 console.log('Test tokens prepared without printing credentials.');

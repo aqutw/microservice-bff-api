@@ -39,7 +39,7 @@ export default function Home() {
         throw new Error(body.error || 'checkout_failed');
       }
       setResult(body);
-      for (let attempt = 0; body.state === 'processing' && attempt < 90; attempt++) {
+      for (let attempt = 0; !['awaiting_payment', 'paid'].includes(body.state) && attempt < 90; attempt++) {
         await new Promise(resolve => setTimeout(resolve, 1000));
         const status = await fetch(`/api/checkouts/${encodeURIComponent(body.checkoutId || body.checkout_id)}`);
         body = await status.json();
@@ -49,7 +49,7 @@ export default function Home() {
         }
         setResult(body);
       }
-      if (body.state !== 'processing') checkoutAttempt.current = null;
+      if (['awaiting_payment', 'paid'].includes(body.state)) checkoutAttempt.current = null;
     } catch (error) { setResult({ error: error.message }); }
     finally { setLoading(false); }
   }

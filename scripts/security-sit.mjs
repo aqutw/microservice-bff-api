@@ -52,7 +52,10 @@ assert.equal((await internal('payment', 'order', `/v1/payments/${a.payment.id}`)
 assert.equal((await internal('payment', 'desktop-bff', `/v1/payments/${a.payment.id}/confirm`, 'POST', {}, process.env.BOB_ACTOR)).status, 404);
 assert.equal((await internal('payment', 'order', `/v1/payments/${a.payment.id}/confirm`, 'POST', {})).status, 403);
 assert.equal((await internal('payment', 'order', `/v1/payments/${a.payment.id}`)).body.status, 'pending');
-assert.equal((await call(app, `/api/payments/${a.payment.id}/confirm`, alice, 'POST', {})).status, 200);
+let confirmed = await call(app, `/api/payments/${a.payment.id}/confirm`, alice, 'POST', {});
+assert.ok([200,202].includes(confirmed.status));
+for(let attempt=0;confirmed.status===202 && attempt<60;attempt++) { await sleep(500);confirmed=await call(app,`/api/checkouts/${confirmed.body.checkoutId}`,alice); }
+assert.equal(confirmed.status,200);assert.equal(confirmed.body.state,'paid');
 console.log('PASS: ownership at BFF and Payment, no rejected-payment mutation, owner-bound idempotency');
 
 // Exercise a real browser authorization code flow with a small cookie jar.

@@ -1,6 +1,4 @@
 import http from 'k6/http';
-import crypto from 'k6/crypto';
-import encoding from 'k6/encoding';
 import { check, sleep } from 'k6';
 import { Counter, Rate } from 'k6/metrics';
 
@@ -11,7 +9,6 @@ const appAttempted = new Counter('app_transactions_attempted');
 
 const desktop = __ENV.DESKTOP_BFF_URL || 'https://127.0.0.1:3001';
 const app = __ENV.APP_BFF_URL || 'https://127.0.0.1:3002';
-const inventory = __ENV.INVENTORY_API_URL || 'https://127.0.0.1:8082';
 
 export const options = {
   scenarios: {
@@ -91,16 +88,6 @@ export function auditRead() {
   check(response, { 'audit returns 200': r => r.status === 200, 'audit has events array': r => Array.isArray(body(r).events) });
 }
 
-function commitReservation(reservationID, id) {
-  const path = `/v1/reservations/${reservationID}/commit`;
-  const stamp = String(Math.floor(Date.now() / 1000));
-  const nonce = Array.from(new Uint8Array(crypto.randomBytes(16)), byte => byte.toString(16).padStart(2, '0')).join('');
-  const canonical = ['POST', path, crypto.sha256('', 'hex'), 'order', 'inventory', stamp, nonce, '', id, '', ''].join('\n');
-  const signature = crypto.hmac('sha256', encoding.b64decode(__ENV.INVENTORY_SERVICE_KEY || '', 'rawurl'), canonical, 'hex');
-  const response = http.post(`${inventory}${path}`, '', { headers: { 'X-Correlation-ID': id, 'X-Service-ID': 'order', 'X-Service-Time': stamp, 'X-Service-Nonce': nonce, 'X-Service-Signature': signature } });
-  return check(response, { 'inventory commit returns 200': r => r.status === 200 && body(r).status === 'committed' });
-}
-
 function resolveCheckout(response, base) {
   if (response.status !== 202) return response;
   const checkoutId = body(response).checkoutId;
@@ -121,9 +108,9 @@ function runDesktopCheckout() {
   const checkoutBody = body(checkout);
   const checkoutOK = check(checkout, { 'desktop checkout is ready': r => r.status === 201 || r.status === 200, 'desktop returns payment and reservation': r => Boolean(checkoutBody.payment?.id && checkoutBody.inventory?.reservationId) });
   if (!checkoutOK) return false;
-  const payment = http.post(`${desktop}/api/payments/${checkoutBody.payment.id}/confirm`, '{}', options);
-  const paymentOK = check(payment, { 'desktop payment returns paid': r => r.status === 200 && body(r).payment?.status === 'paid' });
-  if (paymentOK) completed = commitReservation(checkoutBody.inventory.reservationId, id);
+  const payment = resolveCheckout(http.post(`${desktop}/api/payments/${checkoutBody.payment.id}/confirm`, '{}', options), desktop);
+  const paymentOK = check(payment, { 'desktop payment returns paid': r => r.status === 200 && body(r).state === 'paid' && body(r).payment?.status === 'paid' && (body(r).orderStatus === 'paid' || body(r).order?.status === 'paid') });
+  completed = paymentOK;
   sleep(0.1);
   return completed;
 }
@@ -136,9 +123,9 @@ function runAppCheckout() {
   const checkoutBody = body(checkout);
   const checkoutOK = check(checkout, { 'app checkout is ready': r => r.status === 201 || r.status === 200, 'app returns client token': r => Boolean(checkoutBody.payment?.id && checkoutBody.payment?.clientToken) });
   if (!checkoutOK) return false;
-  const payment = http.post(`${app}/api/payments/${checkoutBody.payment.id}/confirm`, '{}', options);
+  const payment = resolveCheckout(http.post(`${app}/api/payments/${checkoutBody.payment.id}/confirm`, '{}', options), app);
   const paymentOK = check(payment, { 'app payment returns paid': r => r.status === 200 && body(r).state === 'paid' });
-  if (paymentOK) completed = commitReservation(checkoutBody.reservationId, id);
+  completed = paymentOK;
   sleep(0.1);
   return completed;
 }

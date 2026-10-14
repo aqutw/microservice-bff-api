@@ -66,7 +66,10 @@ func initCheckouts() error {
 	}
 	_, err = db.Exec(`UPDATE checkouts SET order_id=json_extract(result_json,'$.order.id') WHERE order_id='';
 CREATE UNIQUE INDEX IF NOT EXISTS checkouts_order ON checkouts(order_id) WHERE order_id<>'';`)
-	return err
+	if err != nil {
+		return err
+	}
+	return recoverLegacySettlements()
 }
 
 func checkouts(w http.ResponseWriter, r *http.Request) {
