@@ -109,13 +109,15 @@ func initDB() error {
 	_, err := db.Exec(`PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS stock (sku TEXT PRIMARY KEY, available INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS reservations (id TEXT PRIMARY KEY, order_id TEXT NOT NULL, status TEXT NOT NULL, items_json TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, expires_at INTEGER NOT NULL DEFAULT 0);
-CREATE INDEX IF NOT EXISTS reservations_expiry ON reservations(status, expires_at);
 CREATE TABLE IF NOT EXISTS audit_outbox (event_id TEXT PRIMARY KEY,event_type TEXT NOT NULL,service TEXT NOT NULL,aggregate_type TEXT NOT NULL,aggregate_id TEXT NOT NULL,actor_id TEXT NOT NULL,correlation_id TEXT NOT NULL,action TEXT NOT NULL,status TEXT NOT NULL,before_json TEXT,after_json TEXT,occurred_at DATETIME NOT NULL,published_at TEXT,attempts INTEGER NOT NULL DEFAULT 0,last_error TEXT);`)
 	if err != nil {
 		return err
 	}
 	// Databases created before reservation expiry existed need the column added.
 	if _, err = db.Exec("ALTER TABLE reservations ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0"); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	if _, err = db.Exec("CREATE INDEX IF NOT EXISTS reservations_expiry ON reservations(status, expires_at)"); err != nil {
 		return err
 	}
 	var count int
