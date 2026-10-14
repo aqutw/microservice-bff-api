@@ -103,6 +103,8 @@ Order owns the settlement workflow. The BFF triggers
 `POST /v1/orders/{id}/settlement`; generic Order updates reject `status=paid`.
 Inventory commit requires `{ "order_id": "..." }`, checks the deadline atomically,
 and treats repeated commits as success without duplicate stock or audit effects.
+`RESERVATION_TTL_SECONDS` defaults to 900; nonpositive, malformed or overflowing
+values use that default instead of shortening holds or generating past deadlines.
 Order publishes `paid`, its checkout snapshot and audit event in one local transaction.
 Lost responses retain a durable stage and fixed operation key until resolved.
 

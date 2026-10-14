@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	_ "modernc.org/sqlite"
 	"net/http"
 	"net/url"
@@ -99,11 +100,11 @@ func getenv(k, fallback string) string {
 // reservationTTL is how long a hold survives without being committed or
 // released. A paid order commits its reservation, which the sweeper ignores.
 func reservationTTL() int64 {
-	seconds, _ := strconv.Atoi(getenv("RESERVATION_TTL_SECONDS", "900"))
-	if seconds < 1 {
-		seconds = 1
+	seconds, err := strconv.ParseInt(getenv("RESERVATION_TTL_SECONDS", "900"), 10, 64)
+	if err != nil || seconds < 1 || seconds > (math.MaxInt64-time.Now().UnixMilli())/1000 {
+		seconds = 900
 	}
-	return int64(seconds) * 1000
+	return seconds * 1000
 }
 func initDB() error {
 	_, err := db.Exec(`PRAGMA journal_mode=WAL;
