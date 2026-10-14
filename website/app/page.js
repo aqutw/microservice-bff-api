@@ -1,6 +1,7 @@
 'use client';
 import SessionControls from './auth/session-controls';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { pollCheckout } from '../lib/checkout-flow.mjs';
 
 const BFF_URL = '';
 const fallbackProducts = [
@@ -33,24 +34,12 @@ export default function Home() {
         method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': checkoutAttempt.current.key, 'x-csrf-token': session.csrfToken },
         body: JSON.stringify({ items })
       });
-      let body = await response.json();
-      if (!response.ok) {
-        if (response.status < 500) checkoutAttempt.current = null;
-        throw new Error(body.error || 'checkout_failed');
-      }
-      setResult(body);
-      for (let attempt = 0; !['awaiting_payment', 'paid'].includes(body.state) && attempt < 90; attempt++) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        const status = await fetch(`/api/checkouts/${encodeURIComponent(body.checkoutId || body.checkout_id)}`);
-        body = await status.json();
-        if (!status.ok) {
-          if (status.status < 500) checkoutAttempt.current = null;
-          throw new Error(body.error || 'checkout_failed');
-        }
-        setResult(body);
-      }
-      if (['awaiting_payment', 'paid'].includes(body.state)) checkoutAttempt.current = null;
-    } catch (error) { setResult({ error: error.message }); }
+      await pollCheckout(response, { onUpdate: setResult, fetchStatus: id => fetch(`/api/checkouts/${encodeURIComponent(id)}`) });
+      checkoutAttempt.current = null;
+    } catch (error) {
+      if (error.terminal) checkoutAttempt.current = null;
+      setResult({ error: error.message, ...(error.checkoutId ? { checkoutId: error.checkoutId } : {}) });
+    }
     finally { setLoading(false); }
   }
   return <main className="shell">
