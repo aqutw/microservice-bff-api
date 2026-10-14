@@ -204,6 +204,22 @@ func orderAction(w http.ResponseWriter, r *http.Request) {
 		write(w, 409, map[string]string{"error": "settlement_required"})
 		return
 	}
+	if body.Status == "cancelled" {
+		var checkoutID string
+		lookupErr := db.QueryRow("SELECT id FROM checkouts WHERE order_id=?", id).Scan(&checkoutID)
+		if lookupErr == nil {
+			requestCancellation(w, r, id, checkoutID)
+			return
+		}
+		if lookupErr != sql.ErrNoRows {
+			write(w, 500, map[string]string{"error": "cancellation_unavailable"})
+			return
+		}
+		if reservationID != "" {
+			write(w, 409, map[string]string{"error": "checkout_required"})
+			return
+		}
+	}
 	allowed := map[string]bool{"pending_payment": true, "paid": true, "cancelled": true, "shipped": true}
 	if !allowed[body.Status] {
 		write(w, 400, map[string]string{"error": "invalid_status"})
@@ -239,15 +255,6 @@ func orderAction(w http.ResponseWriter, r *http.Request) {
 		}
 		write(w, 409, map[string]string{"error": "order_transition_conflict"})
 		return
-	}
-	// Cancelling must also release the inventory hold so stock is not stranded.
-	if body.Status == "cancelled" {
-		job := checkoutJob{Actor: r.Header.Get("X-Actor-ID"), Correlation: r.Header.Get("X-Correlation-ID")}
-		if err = releaseInventoryReservation(job, reservationID); err != nil {
-			_ = tx.Rollback()
-			write(w, 502, map[string]string{"error": "inventory_release_failed"})
-			return
-		}
 	}
 	if err = recordAuditTx(tx, r, "order.status_changed", "order", id, "update_status", "success", map[string]any{"status": status}, map[string]any{"status": body.Status}); err != nil {
 		_ = tx.Rollback()

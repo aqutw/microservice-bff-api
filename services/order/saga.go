@@ -38,6 +38,7 @@ type checkoutJob struct {
 	ErrorMessage                  string
 	Attempts                      int
 	Lease                         int64
+	CancelRequested               bool
 }
 type upstreamFailure struct {
 	status  int
@@ -58,6 +59,9 @@ func initCheckouts() error {
 		return err
 	}
 	if _, err = db.Exec("ALTER TABLE checkouts ADD COLUMN order_id TEXT NOT NULL DEFAULT ''"); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	if _, err = db.Exec("ALTER TABLE checkouts ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}
 	_, err = db.Exec(`UPDATE checkouts SET order_id=json_extract(result_json,'$.order.id') WHERE order_id='';
@@ -168,7 +172,7 @@ func checkoutStatus(w http.ResponseWriter, r *http.Request) {
 func loadCheckout(id string) (checkoutJob, error) {
 	job := checkoutJob{ID: id}
 	var input, result string
-	err := db.QueryRow("SELECT request_json,stage,result_json,actor_id,correlation_id,error_status,error_message,attempts,lease_until FROM checkouts WHERE id=?", id).Scan(&input, &job.Stage, &result, &job.Actor, &job.Correlation, &job.ErrorStatus, &job.ErrorMessage, &job.Attempts, &job.Lease)
+	err := db.QueryRow("SELECT request_json,stage,result_json,actor_id,correlation_id,error_status,error_message,attempts,lease_until,cancel_requested FROM checkouts WHERE id=?", id).Scan(&input, &job.Stage, &result, &job.Actor, &job.Correlation, &job.ErrorStatus, &job.ErrorMessage, &job.Attempts, &job.Lease, &job.CancelRequested)
 	if err != nil {
 		return job, err
 	}
@@ -194,6 +198,12 @@ func writeCheckout(w http.ResponseWriter, id string) {
 			status = 500
 		}
 		write(w, status, map[string]any{"error": job.ErrorMessage, "checkout_id": id})
+		return
+	}
+	if job.CancelRequested && job.Stage != "paid" && job.Stage != "refund_pending" {
+		job.Result.State = "cancelling"
+		job.Result.Order.Status = "cancelling"
+		write(w, 202, job.Result)
 		return
 	}
 	if job.Stage == "awaiting_payment" || job.Stage == "paid" {
@@ -281,24 +291,12 @@ func processCheckout(id string) {
 	}
 	job.Lease = lease
 	for step := 0; step < 4; step++ {
-		// A direct cancel of the order must stop the workflow instead of still
-		// reserving stock or charging a payment the user already abandoned.
-		if job.Stage == "reserve" || job.Stage == "payment" || job.Stage == "awaiting_payment" {
-			var orderStatus string
-			if scanErr := db.QueryRow("SELECT status FROM orders WHERE id=?", job.Result.Order.ID).Scan(&orderStatus); scanErr == nil && orderStatus == "cancelled" {
-				job.ErrorStatus = 409
-				job.ErrorMessage = "order_cancelled"
-				if reservationID(job.Result) != "" {
-					if checkpoint(&job, "compensate") != nil {
-						return
-					}
-					continue
-				}
-				job.ErrorStatus = 409
-				job.ErrorMessage = "order_cancelled"
-				_ = checkpoint(&job, "failed")
+		if job.Stage == "awaiting_payment" && job.CancelRequested {
+			job.ErrorStatus, job.ErrorMessage = 409, "order_cancelled"
+			if checkpoint(&job, "compensate") != nil {
 				return
 			}
+			continue
 		}
 		switch job.Stage {
 		case "reserve":
@@ -316,7 +314,11 @@ func processCheckout(id string) {
 				_, err = db.Exec("UPDATE orders SET reservation_id=? WHERE id=?", reservationID(job.Result), job.Result.Order.ID)
 			}
 			if err == nil {
-				err = checkpoint(&job, "payment")
+				stage := "payment"
+				if cancellationRequested(&job) {
+					stage = "compensate"
+				}
+				err = checkpoint(&job, stage)
 			}
 		case "payment":
 			job.Result.Payment, err = callCheckout(job, env("PAYMENT_API_URL", "https://localhost:8083"), "/v1/payments", map[string]any{"order_id": job.Result.Order.ID, "amount_cents": job.Input.TotalCents, "currency": job.Input.Currency, "channel": job.Input.Channel})
@@ -331,8 +333,12 @@ func processCheckout(id string) {
 			}
 			if err == nil {
 				job.Result.State = "awaiting_payment"
-				err = checkpoint(&job, "awaiting_payment")
-				if err == nil {
+				stage := "awaiting_payment"
+				if cancellationRequested(&job) {
+					stage = "compensate"
+				}
+				err = checkpoint(&job, stage)
+				if err == nil && stage == "awaiting_payment" {
 					return
 				}
 			}
@@ -459,6 +465,34 @@ func inventoryReservationStatus(job checkoutJob, id string) (string, error) {
 }
 
 func compensateCheckout(job *checkoutJob) error {
+	// Resolve Payment before closing the workflow: confirmation may have won a cancellation race.
+	if paymentID(*job) != "" {
+		payment, err := lookupPayment(*job)
+		if err != nil {
+			return err
+		}
+		switch payment.Status {
+		case "paid":
+			return queueCancellationRefund(job)
+		case "pending":
+			body, callErr := callCheckout(*job, env("PAYMENT_API_URL", "https://localhost:8083"), "/v1/payments/"+payment.ID+"/cancel", nil)
+			if callErr != nil {
+				return callErr
+			}
+			var result paymentView
+			if json.Unmarshal(body, &result) != nil || result.ID != payment.ID || result.OrderID != job.Result.Order.ID || result.Status != "cancelled" {
+				return fmt.Errorf("invalid_payment_cancel_response")
+			}
+			payment.Status = "cancelled"
+		case "cancelled", "refunded":
+		default:
+			return fmt.Errorf("unknown_payment_status_%s", payment.Status)
+		}
+		job.Result.Payment, err = snapshotStatus(job.Result.Payment, payment.Status)
+		if err != nil {
+			return err
+		}
+	}
 	if err := releaseInventoryReservation(*job, reservationID(job.Result)); err != nil {
 		return err
 	}

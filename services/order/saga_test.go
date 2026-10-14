@@ -266,51 +266,28 @@ func TestPaidOrderCommitsReservation(t *testing.T) {
 }
 
 func TestDirectOrderCancelReleasesReservation(t *testing.T) {
-	setupOrderTestDB(t)
-	var mu sync.Mutex
-	state, releases := "reserved", 0
-	inventory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		defer mu.Unlock()
-		if strings.HasSuffix(r.URL.Path, "/release") {
-			state, releases = "released", releases+1
-			write(w, 200, map[string]string{"reservation_id": "r1", "status": "released"})
-			return
-		}
-		if r.Method == http.MethodGet {
-			write(w, 200, map[string]string{"reservation_id": "r1", "status": state})
-			return
-		}
-		write(w, 201, map[string]string{"reservation_id": "r1", "status": "reserved"})
-	}))
-	defer inventory.Close()
-	payment := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		write(w, 201, map[string]string{"id": "p1", "status": "pending"})
-	}))
-	defer payment.Close()
-	t.Setenv("INVENTORY_API_URL", inventory.URL)
-	t.Setenv("PAYMENT_API_URL", payment.URL)
-	if response := checkoutForTest("direct-cancel"); response.Code != 201 {
-		t.Fatalf("status=%d", response.Code)
-	}
+	f := setupSettlementFixture(t, "")
+	f.mu.Lock()
+	f.payment = "pending"
+	f.mu.Unlock()
 	job := jobForTest(t)
-	var reservation string
-	_ = db.QueryRow("SELECT reservation_id FROM orders WHERE id=?", job.Result.Order.ID).Scan(&reservation)
-	if reservation != "r1" {
-		t.Fatalf("reservation_id=%q", reservation)
-	}
 	response := httptest.NewRecorder()
 	orderAction(response, ownedRequest("POST", "/v1/orders/"+job.Result.Order.ID, strings.NewReader(`{"status":"cancelled"}`)))
 	if response.Code != 200 {
 		t.Fatalf("cancel=%d %s", response.Code, response.Body)
 	}
+	job = jobForTest(t)
 	var status string
-	_ = db.QueryRow("SELECT status FROM orders WHERE id=?", job.Result.Order.ID).Scan(&status)
-	mu.Lock()
-	released := releases
-	mu.Unlock()
-	if status != "cancelled" || released != 1 {
-		t.Fatalf("order=%s releases=%d", status, released)
+	db.QueryRow("SELECT status FROM orders WHERE id=?", job.Result.Order.ID).Scan(&status)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if status != "cancelled" || f.inventory != "released" || f.payment != "cancelled" || job.ErrorStatus != 409 {
+		t.Fatalf("order=%s inventory=%s payment=%s error=%d", status, f.inventory, f.payment, job.ErrorStatus)
+	}
+	response = httptest.NewRecorder()
+	writeCheckout(response, job.ID)
+	if response.Code != 409 {
+		t.Fatalf("cancelled checkout=%d", response.Code)
 	}
 }
 

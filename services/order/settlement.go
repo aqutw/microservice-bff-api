@@ -325,5 +325,8 @@ func settleOrder(w http.ResponseWriter, r *http.Request, id string) {
 	if job.Stage == "paid" {
 		status = 200
 	}
+	if job.CancelRequested && job.Stage != "paid" && job.Stage != "refund_pending" {
+		job.Result.State, job.Result.Order.Status = "cancelling", "cancelling"
+	}
 	write(w, status, map[string]string{"checkout_id": checkoutID, "state": job.Result.State, "order_status": job.Result.Order.Status})
 }

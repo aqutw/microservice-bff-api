@@ -87,6 +87,13 @@ func setupSettlementFixture(t *testing.T, failure string) *settlementFixture {
 				f.refunds++
 			}
 		}
+		if strings.HasSuffix(r.URL.Path, "/cancel") {
+			if f.payment == "paid" {
+				write(w, 409, map[string]string{"error": "payment_transition_conflict"})
+				return
+			}
+			f.payment = "cancelled"
+		}
 		status := 200
 		if r.URL.Path == "/v1/payments" {
 			status = 201

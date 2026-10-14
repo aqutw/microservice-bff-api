@@ -92,6 +92,14 @@ export function createServer(variant, services = defaults, security = {}) {
         requireOwner(order.user_id, identity);
         return json(res, 200, order);
       }
+      const cancelMatch = path.match(/^\/api\/orders\/([^/]+)\/cancel$/);
+      if (req.method === 'POST' && cancelMatch) {
+        const id = encodeURIComponent(cancelMatch[1]);
+        const order = await request(services.order, `/v1/orders/${id}`, { headers: context, service: 'order' });
+        requireOwner(order.user_id, identity);
+        const cancelled = await request(services.order, `/v1/orders/${id}`, { service: 'order', method: 'POST', headers: context, body: JSON.stringify({ status: 'cancelled' }) });
+        return json(res, cancelled.status === 'cancelled' ? 200 : 202, { orderId: cancelled.order_id, state: cancelled.status, checkoutId: cancelled.checkout_id });
+      }
       const paymentMatch = path.match(/^\/api\/payments\/([^/]+)\/confirm$/);
       if (req.method === 'POST' && paymentMatch) {
         const reference = await request(services.payment, `/v1/payments/${encodeURIComponent(paymentMatch[1])}`, { headers: context, service: 'payment' });

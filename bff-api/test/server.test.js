@@ -105,3 +105,17 @@ for (const variant of ['desktop','app']) test(`${variant} payment confirmation d
  assert.equal(result.body.checkoutId,'c1');
  if(variant==='desktop') assert.equal(result.body.orderStatus,'settling');
 });
+
+test('cancellation exposes pending recovery and rejects another owner before mutation',async()=>{
+ let mutations=0;
+ globalThis.fetch=async(url,options)=>{
+  if(options.method==='POST') { mutations++;assert.deepEqual(JSON.parse(options.body),{status:'cancelled'});return response({order_id:'o1',status:'cancelling',checkout_id:'c1'},202); }
+  return response({id:'o1',user_id:'user-1'});
+ };
+ const handler=server('desktop',{order:'https://order'});
+ const req={method:'POST',url:'/api/orders/o1/cancel',headers:{}};
+ const pending=await invoke(handler,req);
+ assert.equal(pending.status,202);assert.equal(pending.body.state,'cancelling');assert.equal(mutations,1);
+ globalThis.fetch=async()=>response({id:'o1',user_id:'someone-else'});
+ assert.equal((await invoke(handler,req)).status,404);assert.equal(mutations,1);
+});
