@@ -2,8 +2,6 @@ name: sit
 
 on:
   push:
-    branches-ignore:
-      - 'loadtest-**'
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
@@ -17,7 +15,7 @@ concurrency:
 
 jobs:
   sit:
-    if: github.ref_type == 'branch' && !startsWith(github.head_ref || github.ref_name, 'loadtest-')
+    if: github.ref_type == 'branch'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:

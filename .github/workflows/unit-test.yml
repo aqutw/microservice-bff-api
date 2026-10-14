@@ -2,15 +2,12 @@ name: unit-test
 
 on:
   push:
-    branches-ignore:
-      - 'loadtest-**'
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 jobs:
   go-test:
-    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'loadtest-')
     strategy:
       fail-fast: false
       matrix:
@@ -27,7 +24,6 @@ jobs:
         run: go test -race ./...
 
   settlement-sit:
-    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'loadtest-')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -43,7 +39,6 @@ jobs:
       - run: node scripts/settlement-sit.mjs
 
   bff-contract-test:
-    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'loadtest-')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -58,7 +53,6 @@ jobs:
       - run: node --test ../loadtest/commerce.test.mjs
 
   website-build:
-    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'loadtest-')
     runs-on: ubuntu-latest
     defaults:
       run:
