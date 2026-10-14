@@ -140,6 +140,7 @@ npm test --prefix bff-api
 npm test --prefix website
 node --test loadtest/commerce.test.mjs
 node scripts/settlement-sit.mjs
+node scripts/compose-sit.mjs
 npm run build --prefix website
 for service in security order inventory payment audit-worker; do
   (cd services/$service && go test -race ./...) || break
@@ -153,6 +154,12 @@ checks cancellation races, and verifies final stock and audit counts. It needs
 Go, Node.js 22+, OpenSSL and Python 3; no Docker or existing credentials are used.
 Successful runs clean up their processes and temporary files; failed runs retain
 isolated diagnostics. Real OIDC remains covered by Security SIT below.
+
+`compose-sit.mjs` copies the service sources into its own ignored artifact directory,
+allocates unused local ports and creates a fresh Compose project, credentials and
+volumes. It runs both Security SIT and commerce SIT, then removes its containers,
+volumes and generated credentials. Logs and `result.json` remain under `artifacts/`.
+It supports either `docker compose` or the standalone `docker-compose` executable.
 
 Run integration checks against a dedicated Compose project with fresh volumes:
 

@@ -27,6 +27,9 @@ internal_headers() { node scripts/request-headers.mjs "$@"; }
 artifacts_dir=artifacts/sit
 mkdir -p "$artifacts_dir"
 run_id="sit-$(date +%s)-$$"
+compose() {
+ if [[ "${COMPOSE_BIN:-docker}" == docker ]]; then docker compose "$@"; else "${COMPOSE_BIN}" "$@"; fi
+}
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "PASS: $*"; }
@@ -161,7 +164,7 @@ assert_json stock-failure-audit 'any(.events[]; .service == "order" and .after.s
 pass 'Stock rejection compensates the order without changing inventory'
 
 before=$(stock coffee-beans)
-docker compose stop payment
+compose stop payment
 correlation="$run_id-payment-failure"
 call 202 payment-failure POST ${DESKTOP_BFF_URL}/api/checkout "$correlation" \
   '{"user_id":"sit-failure","items":[{"sku":"coffee-beans","quantity":1,"unit_price_cents":420}]}'
@@ -172,9 +175,9 @@ for attempt in {1..30}; do
   sleep 1
 done
 [[ $(stock coffee-beans) -eq $((before - 1)) ]] || fail 'Pending checkout did not keep its reservation'
-docker compose restart order
+compose restart order
 wait_http ${ORDER_API_URL}/healthz
-docker compose start payment
+compose start payment
 wait_http ${PAYMENT_API_URL}/healthz
 for attempt in {1..90}; do
   status=$(curl --silent --show-error --header "authorization: Bearer $SIT_TOKEN" --max-time 5 --output "$artifacts_dir/payment-recovery.json" --write-out '%{http_code}' "${DESKTOP_BFF_URL}/api/checkouts/$checkout_id")
@@ -186,15 +189,15 @@ assert_json payment-recovery '.state == "awaiting_payment" and (.payment.id | ty
 wait_audit "$correlation" 3 payment-failure-audit
 pass 'Payment outage leaves a durable workflow that resumes after Order restart'
 
-docker compose stop audit-worker
+compose stop audit-worker
 correlation="$run_id-audit-outage"
 call 201 outage-checkout POST ${DESKTOP_BFF_URL}/api/checkout "$correlation" \
   '{"user_id":"sit-audit-outage","items":[{"sku":"coffee-beans","quantity":1,"unit_price_cents":420}]}'
 assert_json outage-checkout '.order.status == "pending_payment"'
 # Restart producers before recovery: queued events must survive in SQLite.
-docker compose restart order inventory payment
+compose restart order inventory payment
 for url in "$ORDER_API_URL" "$INVENTORY_API_URL" "$PAYMENT_API_URL"; do wait_http "$url/healthz"; done
-docker compose start audit-worker
+compose start audit-worker
 wait_http ${AUDIT_API_URL}/healthz
 wait_audit "$correlation" 3 outage-audit
 assert_json outage-audit '([.events[].service] | unique | sort) == ["inventory","order","payment"]'
