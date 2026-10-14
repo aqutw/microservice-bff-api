@@ -2,7 +2,9 @@ package main
 
 import (
 	"database/sql"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,5 +44,34 @@ INSERT INTO reservations(id,order_id,status,items_json) VALUES ('legacy','old-or
 	// Legacy holds may already belong to paid orders; expiry requires an explicit migration of those associations.
 	if available != 19 || status != "reserved" || expires != 0 || indexes != 1 {
 		t.Fatalf("stock=%d status=%s expires=%d indexes=%d", available, status, expires, indexes)
+	}
+}
+
+func TestLegacyZeroDeadlineHoldCanCommitWithoutRestoringSoldStock(t *testing.T) {
+	setupInventoryTestDB(t)
+	if _, err := db.Exec(`UPDATE stock SET available=19 WHERE sku='mug'; INSERT INTO reservations(id,order_id,status,items_json,expires_at) VALUES('legacy','legacy-order','reserved','[{"sku":"mug","quantity":1}]',0)`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		w := httptest.NewRecorder()
+		reservationAction(w, httptest.NewRequest("POST", "/v1/reservations/legacy/commit", strings.NewReader(`{"order_id":"legacy-order"}`)))
+		if w.Code != 200 {
+			t.Fatalf("legacy commit=%d %s", w.Code, w.Body)
+		}
+	}
+	releaseExpiredReservations()
+	var stock, events int
+	var status string
+	if err := db.QueryRow("SELECT available FROM stock WHERE sku='mug'").Scan(&stock); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT status FROM reservations WHERE id='legacy'").Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow("SELECT count(*) FROM audit_outbox WHERE aggregate_id='legacy'").Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if stock != 19 || status != "committed" || events != 1 {
+		t.Fatalf("stock=%d status=%s audit=%d", stock, status, events)
 	}
 }
