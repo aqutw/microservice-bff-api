@@ -44,13 +44,15 @@ async function run(workspace) {
  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
  const prefix = peer => peer.replaceAll('-', '_').toUpperCase();
  const faults = { reserve: '', create_payment: '', commit: '', refund: '', cancel: '', release: '' };
+ let heldCommit;
 
  async function freePort() {
   const listener = net.createServer(); listener.listen(0, '127.0.0.1'); await once(listener, 'listening');
   const port = listener.address().port; await new Promise(resolve => listener.close(resolve)); return port;
  }
- async function waitFor(check, message) {
-  for (let attempt = 0; attempt < 150; attempt++) { try { if (await check()) return; } catch {} await sleep(100); }
+ async function waitFor(check, message, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) { try { if (await check()) return; } catch {} await sleep(100); }
   throw new Error(message);
  }
  function sql(service, statement, values = []) {
@@ -69,18 +71,18 @@ async function run(workspace) {
    SERVICE_INCOMING_KEYS: process.env[`${prefix(service)}_INCOMING_KEYS`], SERVICE_OUTGOING_KEYS: process.env[`${prefix(service)}_OUTGOING_KEYS`],
    SERVICE_TLS_CERT: join(workspace, `.security/pki/${service}.pem`), SERVICE_TLS_KEY: join(workspace, `.security/pki/${service}.key`), SERVICE_CA_FILE: join(workspace, '.security/pki/ca.pem'),
    PORT: String(ports[service]), DB_PATH: join(workspace, `${service}.db`), RESERVATION_TTL_SECONDS: '900',
-   INVENTORY_API_URL: urls['inventory-proxy'], PAYMENT_API_URL: urls['payment-proxy'], ORDER_API_URL: urls.order, AUDIT_WORKER_URL: urls['audit-worker']
+   INVENTORY_API_URL: urls['inventory-proxy'], PAYMENT_API_URL: urls['payment-proxy'], ORDER_API_URL: urls['order-proxy'], AUDIT_WORKER_URL: urls['audit-worker']
   };
   const child = spawn(join(workspace, service), [], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   processes.set(service, child);
   for (const stream of [child.stdout, child.stderr]) stream.on('data', data => appendFileSync(join(workspace, `${service}.log`), data));
   await waitFor(async () => (await fetch(urls[service] + '/healthz', { signal: AbortSignal.timeout(1000) })).ok, `${service} did not start`);
  }
- async function stop(service) {
+ async function stop(service, signal = 'SIGTERM') {
   const child = processes.get(service);
   if (!child) return;
   processes.delete(service);
-  if (child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited; }
+  if (child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); if (signal === 'SIGTERM') child.kill('SIGCONT'); child.kill(signal); await exited; }
  }
  async function proxy(target) {
   const server = https.createServer(certificate(target), (req, res) => {
@@ -91,6 +93,9 @@ async function run(workspace) {
     res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":"injected_outage"}'); return;
    }
    const upstream = https.request(urls[target] + req.url, { method: req.method, headers: req.headers, ca }, response => {
+    if (fault === 'commit' && faults.commit === 'hold' && response.statusCode === 200) {
+     response.resume(); response.on('end', () => { heldCommit = { reservationId: req.url.split('/')[3], response: res }; }); return;
+    }
     if (fault && faults[fault] === 'drop' && [200, 201].includes(response.statusCode)) {
      faults[fault] = 'fail'; response.resume(); response.on('end', () => res.destroy()); return;
     }
@@ -132,11 +137,12 @@ async function run(workspace) {
  }
 
  try {
-  for (const service of [...services, 'inventory-proxy', 'payment-proxy', 'app-bff', 'jwks']) { ports[service] = await freePort(); urls[service] = `https://127.0.0.1:${ports[service]}`; }
-  await proxy('inventory'); await proxy('payment');
+  for (const service of [...services, 'inventory-proxy', 'payment-proxy', 'order-proxy', 'app-bff', 'jwks']) { ports[service] = await freePort(); urls[service] = `https://127.0.0.1:${ports[service]}`; }
+  await proxy('inventory'); await proxy('payment'); await proxy('order');
   for (const service of services) await start(service);
   process.env.SERVICE_NAME = 'desktop-bff'; process.env.SERVICE_OUTGOING_KEYS = process.env.DESKTOP_BFF_OUTGOING_KEYS;
-  const server = http.createServer(createServer('desktop', { order: urls.order, payment: urls.payment, inventory: urls.inventory, audit: urls['audit-worker'] }, { authenticate: async () => ({ id: actor, auditRead: true }) }));
+  const domains = { order: urls['order-proxy'], payment: urls.payment, inventory: urls.inventory, audit: urls['audit-worker'] };
+  const server = http.createServer(createServer('desktop', domains, { authenticate: async () => ({ id: actor, auditRead: true }) }));
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); servers.push(server); bff = `http://127.0.0.1:${server.address().port}`;
 
   const normal = await checkout('normal');
@@ -234,6 +240,43 @@ async function run(workspace) {
    console.log(`PASS: lost ${action} response replays compensation without duplicate audit or stock changes`);
   }
 
+  for (const interruption of ['crash', 'stale-worker']) {
+   const inFlight = await checkout(`in-flight-${interruption}`);
+   heldCommit = undefined; faults.commit = 'hold';
+   // Attach the rejection handler immediately: the BFF can time out while recovery waits for the lease.
+   const confirmation = api(`/api/payments/${inFlight.payment.id}/confirm`, 'POST', {}).then(result => ({ result }), error => ({ error }));
+   await waitFor(() => heldCommit?.reservationId === inFlight.inventory.reservationId, 'commit did not reach the response barrier');
+   const [[stage, lease]] = sql('order', 'SELECT stage,lease_until FROM checkouts WHERE id=?', [inFlight.checkoutId]);
+   assert.equal(stage, 'settling'); assert.ok(lease > Date.now() + 50000, 'expected a live production 60-second lease');
+   assert.equal((await internal('inventory', 'order', `/v1/reservations/${inFlight.inventory.reservationId}`)).body.status, 'committed');
+   if (interruption === 'crash') {
+    await stop('order', 'SIGKILL');
+   } else {
+    const oldWorker = processes.get('order');
+    oldWorker.kill('SIGSTOP'); processes.set('order-stale', oldWorker);
+    ports.order = await freePort(); urls.order = `https://127.0.0.1:${ports.order}`;
+   }
+   heldCommit.response.destroy(); faults.commit = '';
+   await start('order');
+   await sleep(1000);
+   const [[beforeStage, beforeLease]] = sql('order', 'SELECT stage,lease_until FROM checkouts WHERE id=?', [inFlight.checkoutId]);
+   assert.equal(beforeStage, 'settling'); assert.equal(beforeLease, lease);
+   console.log(`CHECK: ${interruption} preserved the active lease; waiting for its actual expiry`);
+   await waitFor(() => sql('order', 'SELECT stage FROM checkouts WHERE id=?', [inFlight.checkoutId])[0][0] === 'paid', 'expired lease was not reclaimed', Math.max(0, lease - Date.now()) + 15000);
+   await paid(inFlight);
+   if (interruption === 'stale-worker') {
+    processes.get('order-stale').kill('SIGCONT');
+    await waitFor(() => readFileSync(join(workspace, 'order.log'), 'utf8').includes(`checkout ${inFlight.checkoutId} stage settling will retry`), 'stale worker did not resume its old claim');
+    await stop('order-stale');
+   }
+   const completed = await confirmation;
+   assert.ok(completed.error || completed.result.status >= 500, 'interrupted confirmation must report an unknown outcome');
+   assert.deepEqual(sql('order', 'SELECT stage,lease_until,attempts FROM checkouts WHERE id=?', [inFlight.checkoutId]), [['paid', 0, 0]]);
+   assert.equal(sql('order', "SELECT count(*) FROM audit_outbox WHERE aggregate_id=? AND event_type='order.status_changed'", [inFlight.order.id])[0][0], 1);
+   assert.equal(sql('inventory', "SELECT count(*) FROM audit_outbox WHERE aggregate_id=? AND event_type='inventory.committed'", [inFlight.inventory.reservationId])[0][0], 1);
+   console.log(`PASS: ${interruption} during RPC recovers after real lease expiry without stale writes or duplicate sale/audit`);
+  }
+
   // Exercise the actual App process and its separate service credentials. Domain faults remain shared above.
   const jose=await import(createRequire(new URL('../bff-api/package.json',import.meta.url)).resolve('jose'));
   const {publicKey,privateKey}=await jose.generateKeyPair('RS256');
@@ -246,7 +289,7 @@ async function run(workspace) {
   const appProcess=spawn(process.execPath,[join(repository,'bff-api/src/app.js')],{env:{...process.env,
    SERVICE_NAME:'app-bff',SERVICE_OUTGOING_KEYS:process.env.APP_BFF_OUTGOING_KEYS,
    SERVICE_TLS_CERT:join(workspace,'.security/pki/app-bff.pem'),SERVICE_TLS_KEY:join(workspace,'.security/pki/app-bff.key'),SERVICE_CA_FILE:join(workspace,'.security/pki/ca.pem'),
-   PORT:String(ports['app-bff']),ORDER_API_URL:urls.order,PAYMENT_API_URL:urls.payment,
+   PORT:String(ports['app-bff']),ORDER_API_URL:urls['order-proxy'],PAYMENT_API_URL:urls.payment,
    AUTH_ISSUER:issuer,AUTH_JWKS_URL:`http://127.0.0.1:${ports.jwks}/jwks`,AUTH_AUDIENCE:'commerce-api',DEPLOYMENT_ENV:'development',AUTH_ALLOW_HTTP:'true'
   },stdio:['ignore','pipe','pipe']});
   processes.set('app-bff',appProcess);
@@ -281,7 +324,7 @@ async function run(workspace) {
   const appRefunded=await appApi(`/api/payments/${appRefund.payment.id}/confirm`,'POST',{});assert.ok([202,409].includes(appRefunded.status));
   await waitFor(async()=> (await appApi(`/api/orders/${appRefund.orderId}`)).body.status==='cancelled','App refund incomplete');
   assert.equal((await internal('payment','order',`/v1/payments/${appRefund.payment.id}`)).body.status,'refunded');
-  assert.equal((await internal('inventory','order','/v1/stock/mug')).body.available,14);
+  assert.equal((await internal('inventory','order','/v1/stock/mug')).body.available,12);
   console.log('PASS: actual App BFF credentials, JWT, channel contract, 202 settlement, cancellation and refund');
   console.log('Settlement SIT passed');
  } finally {
