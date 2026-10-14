@@ -16,6 +16,8 @@ type settlementFixture struct {
 	commits, refunds                           int
 	keys                                       []string
 	offline                                    bool
+	paymentEntered, paymentResume              chan struct{}
+	commitEntered, commitResume                chan struct{}
 }
 
 func setupSettlementFixture(t *testing.T, failure string) *settlementFixture {
@@ -62,6 +64,14 @@ func setupSettlementFixture(t *testing.T, failure string) *settlementFixture {
 				f.inventory = "committed"
 				f.commits++
 			}
+			if f.commitEntered != nil {
+				entered, resume := f.commitEntered, f.commitResume
+				f.commitEntered = nil
+				close(entered)
+				f.mu.Unlock()
+				<-resume
+				f.mu.Lock()
+			}
 			if failure == "lost" {
 				f.offline = true
 				connection, _, _ := w.(http.Hijacker).Hijack()
@@ -81,6 +91,14 @@ func setupSettlementFixture(t *testing.T, failure string) *settlementFixture {
 	payment := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if r.Method == http.MethodGet && f.paymentEntered != nil {
+			entered, resume := f.paymentEntered, f.paymentResume
+			f.paymentEntered = nil
+			close(entered)
+			f.mu.Unlock()
+			<-resume
+			f.mu.Lock()
+		}
 		if strings.HasSuffix(r.URL.Path, "/refund") {
 			if f.payment != "refunded" {
 				f.payment = "refunded"
