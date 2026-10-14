@@ -2,7 +2,7 @@
 // Identity is a BFF fixture; real OIDC is covered separately by security-sit.mjs.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, appendFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, appendFileSync } from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
 import net from 'node:net';
@@ -15,21 +15,42 @@ import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { signInternalRequest } from '../bff-api/src/service-auth.js';
 import { createServer } from '../bff-api/src/server.js';
+import { writeSettlementReport } from './sit-report.mjs';
 
 const repository = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const services = ['audit-worker', 'inventory', 'payment', 'order'];
 if (process.argv[2] !== '--run') {
  const workspace = mkdtempSync(join(tmpdir(), 'commerce-settlement-'));
+ mkdirSync(join(repository, 'artifacts'), { recursive: true });
+ const report = mkdtempSync(join(repository, 'artifacts/settlement-sit-'));
+ const sourceRevision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8' }).trim();
+ let workingTreeDirty = false;
+ try { execFileSync('git', ['diff', '--quiet', 'HEAD', '--', 'services', 'scripts', 'bff-api', 'website', 'loadtest'], { cwd: repository }); }
+ catch { workingTreeDirty = true; }
+ const startedAt = new Date().toISOString();
+ let success = false;
+ async function command(executable, args, options = {}) {
+  const child = spawn(executable, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
+  for (const [stream, output] of [[child.stdout, process.stdout], [child.stderr, process.stderr]]) stream.on('data', data => {
+   output.write(data); appendFileSync(join(report, 'run.log'), data);
+  });
+  const [code] = await once(child, 'close');
+  if (code !== 0) throw new Error(`${executable} exited ${code}`);
+ }
  try {
   execFileSync(process.execPath, [join(repository, 'scripts/init-security.mjs')], { cwd: workspace, stdio: 'ignore' });
-  for (const service of services) execFileSync('go', ['build', '-o', join(workspace, service), '.'], { cwd: join(repository, 'services', service), stdio: 'inherit' });
-  execFileSync(process.execPath, [fileURLToPath(import.meta.url), '--run', workspace], {
-   cwd: repository, stdio: 'inherit', env: { ...process.env, NODE_EXTRA_CA_CERTS: join(workspace, '.security/pki/ca.pem') }
+  for (const service of services) await command('go', ['build', '-o', join(workspace, service), '.'], { cwd: join(repository, 'services', service) });
+  await command(process.execPath, [fileURLToPath(import.meta.url), '--run', workspace], {
+   cwd: repository, env: { ...process.env, NODE_EXTRA_CA_CERTS: join(workspace, '.security/pki/ca.pem') }
   });
-  rmSync(workspace, { recursive: true, force: true });
+  success = true;
  } catch (error) {
   console.error(`Settlement SIT failed; isolated diagnostics retained at ${workspace}`);
   process.exitCode = 1;
+ } finally {
+  writeSettlementReport(workspace, report, { sourceRevision, workingTreeDirty, success, startedAt });
+  if (success) rmSync(workspace, { recursive: true, force: true });
+  console.log(`Settlement SIT report: ${report}`);
  }
 } else {
  await run(process.argv[3]);

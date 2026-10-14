@@ -149,11 +149,19 @@ done
 
 Settlement SIT builds the real Go domain services and runs the BFF with a test
 identity against newly generated TLS certificates, signing keys and temporary
-databases. It injects lost commit/refund responses and outages, restarts Order,
-checks cancellation races, and verifies final stock and audit counts. It needs
+databases. It injects lost reserve, payment-create, commit, cancel, refund and release
+responses, kills Order during an in-flight RPC and waits for its real 60-second lease
+to expire. It resumes a stale worker, restarts Inventory/Payment during recovery,
+checks cancellation races, and verifies final stock and audit counts. The actual
+App BFF process also checks JWT authentication, its own credentials, client-token
+contracts, settlement, cancellation and refund. It needs
 Go, Node.js 22+, OpenSSL and Python 3; no Docker or existing credentials are used.
 Successful runs clean up their processes and temporary files; failed runs retain
-isolated diagnostics. Real OIDC remains covered by Security SIT below.
+isolated diagnostics. Both write process logs and `result.json` under
+`artifacts/settlement-sit-*/`. CI uploads only these logs and results, excluding
+generated keys, environment files, tokens and databases. The report records the
+source revision and whether tracked test sources had uncommitted changes.
+Real OIDC remains covered by Security SIT below.
 
 `compose-sit.mjs` copies the service sources into its own ignored artifact directory,
 allocates unused local ports and creates a fresh Compose project, credentials and

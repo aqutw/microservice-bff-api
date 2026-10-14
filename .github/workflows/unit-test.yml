@@ -37,6 +37,15 @@ jobs:
           node-version: '22'
       - run: npm ci --prefix bff-api --ignore-scripts
       - run: node scripts/settlement-sit.mjs
+      - name: Upload settlement recovery diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: settlement-sit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/settlement-sit-*/*.log
+            artifacts/settlement-sit-*/result.json
+          retention-days: 7
 
   bff-contract-test:
     runs-on: ubuntu-latest
@@ -51,6 +60,7 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
       - run: node --test ../loadtest/commerce.test.mjs
+      - run: node --test ../scripts/test/sit-report.test.mjs
 
   website-build:
     runs-on: ubuntu-latest
