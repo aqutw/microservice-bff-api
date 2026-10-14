@@ -277,8 +277,9 @@ func reservationAction(w http.ResponseWriter, r *http.Request) {
 	args := []any{target, id}
 	if action == "commit" {
 		// Zero denotes legacy holds whose payment associations need migration.
-		predicate += " AND (expires_at=0 OR expires_at>?)"
-		args = append(args, time.Now().UnixMilli())
+		// Evaluate the deadline only after SQLite owns the writer lock. A request
+		// timestamp captured before busy_timeout could admit an expired hold.
+		predicate += " AND (expires_at=0 OR expires_at>CAST(unixepoch('subsec')*1000 AS INTEGER))"
 	}
 	result, err := tx.Exec(predicate, args...)
 	if err != nil {
