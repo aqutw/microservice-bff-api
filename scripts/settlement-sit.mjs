@@ -11,6 +11,8 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import { once } from 'node:events';
+import { createRequire } from 'node:module';
+import { createHash } from 'node:crypto';
 import { signInternalRequest } from '../bff-api/src/service-auth.js';
 import { createServer } from '../bff-api/src/server.js';
 
@@ -129,7 +131,7 @@ async function run(workspace) {
  }
 
  try {
-  for (const service of [...services, 'inventory-proxy', 'payment-proxy']) { ports[service] = await freePort(); urls[service] = `https://127.0.0.1:${ports[service]}`; }
+  for (const service of [...services, 'inventory-proxy', 'payment-proxy', 'app-bff', 'jwks']) { ports[service] = await freePort(); urls[service] = `https://127.0.0.1:${ports[service]}`; }
   await proxy('inventory'); await proxy('payment');
   for (const service of services) await start(service);
   process.env.SERVICE_NAME = 'desktop-bff'; process.env.SERVICE_OUTGOING_KEYS = process.env.DESKTOP_BFF_OUTGOING_KEYS;
@@ -191,9 +193,59 @@ async function run(workspace) {
   assert.equal(sql('order', "SELECT count(*) FROM audit_outbox WHERE aggregate_id=? AND event_type='order.settlement_recovering'", [legacy.order.id])[0][0], 1);
   assert.equal((await internal('inventory', 'order', '/v1/stock/mug')).body.available, 15);
   console.log('PASS: previous-version paid workflow is recovered on upgrade; stock matches five sales');
+
+  // Exercise the actual App process and its separate service credentials. Domain faults remain shared above.
+  const jose=await import(createRequire(new URL('../bff-api/package.json',import.meta.url)).resolve('jose'));
+  const {publicKey,privateKey}=await jose.generateKeyPair('RS256');
+  const jwk={...await jose.exportJWK(publicKey),kid:'app-sit',alg:'RS256',use:'sig'};
+  const issuer=`http://127.0.0.1:${ports.jwks}/issuer`;
+  const jwks=http.createServer((req,res)=>{res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify({keys:[jwk]}));});
+  jwks.listen(ports.jwks,'127.0.0.1');await once(jwks,'listening');servers.push(jwks);
+  const token=await new jose.SignJWT({scope:'audit:read'}).setProtectedHeader({alg:'RS256',kid:jwk.kid}).setIssuer(issuer).setAudience('commerce-api').setSubject('app-owner').setIssuedAt().setExpirationTime('5m').sign(privateKey);
+  const appActor=`usr_${createHash('sha256').update(`${issuer}\0app-owner`).digest('hex')}`;
+  const appProcess=spawn(process.execPath,[join(repository,'bff-api/src/app.js')],{env:{...process.env,
+   SERVICE_NAME:'app-bff',SERVICE_OUTGOING_KEYS:process.env.APP_BFF_OUTGOING_KEYS,
+   SERVICE_TLS_CERT:join(workspace,'.security/pki/app-bff.pem'),SERVICE_TLS_KEY:join(workspace,'.security/pki/app-bff.key'),SERVICE_CA_FILE:join(workspace,'.security/pki/ca.pem'),
+   PORT:String(ports['app-bff']),ORDER_API_URL:urls.order,PAYMENT_API_URL:urls.payment,
+   AUTH_ISSUER:issuer,AUTH_JWKS_URL:`http://127.0.0.1:${ports.jwks}/jwks`,AUTH_AUDIENCE:'commerce-api',DEPLOYMENT_ENV:'development',AUTH_ALLOW_HTTP:'true'
+  },stdio:['ignore','pipe','pipe']});
+  processes.set('app-bff',appProcess);
+  for(const stream of [appProcess.stdout,appProcess.stderr])stream.on('data',data=>appendFileSync(join(workspace,'app-bff.log'),data));
+  await waitFor(async()=> (await fetch(urls['app-bff']+'/healthz')).ok,'App BFF did not start');
+  const appApi=async(path,method='GET',body)=>{
+   const result=await fetch(urls['app-bff']+path,{method,headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':path},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(10000)});
+   return {status:result.status,body:await result.json()};
+  };
+  assert.equal((await fetch(urls['app-bff']+'/api/orders/unknown')).status,401);
+  const appCheckout=async key=>{
+   const response=await fetch(urls['app-bff']+'/api/checkout',{method:'POST',headers:{authorization:`Bearer ${token}`,'content-type':'application/json','idempotency-key':`app-${key}`},body:JSON.stringify({items:[{sku:'mug',quantity:1}]})});
+   let result={status:response.status,body:await response.json()};assert.ok([201,202].includes(result.status));
+   const id=result.body.checkoutId;
+   await waitFor(async()=>{if(result.status===202)result=await appApi(`/api/checkouts/${id}`);return [200,201].includes(result.status);},'App checkout not ready');
+   assert.equal(typeof result.body.payment.clientToken,'string');assert.ok(result.body.payment.clientToken);assert.equal(result.body.payment.redirectUrl,undefined);
+   assert.equal((await appApi(`/api/orders/${result.body.orderId}`)).body.user_id,appActor);
+   return result.body;
+  };
+  const appPaid=await appCheckout('paid');faults.commit='fail';
+  const appAccepted=await appApi(`/api/payments/${appPaid.payment.id}/confirm`,'POST',{});
+  assert.equal(appAccepted.status,202);assert.equal(appAccepted.body.state,'settling');assert.equal(appAccepted.body.orderId,appPaid.orderId);assert.equal(appAccepted.body.payment,undefined);
+  faults.commit='';let appFinished;
+  await waitFor(async()=>{appFinished=await appApi(`/api/checkouts/${appPaid.checkoutId}`);return appFinished.body.state==='paid';},'App settlement not finished');
+  assert.equal(appFinished.body.payment.clientToken,appPaid.payment.clientToken);
+  const appCancel=await appCheckout('cancel');assert.ok([200,202].includes((await appApi(`/api/orders/${appCancel.orderId}/cancel`,'POST',{})).status));
+  await waitFor(async()=> (await appApi(`/api/orders/${appCancel.orderId}`)).body.status==='cancelled','App cancellation incomplete');
+  assert.equal((await appApi(`/api/checkouts/${appCancel.checkoutId}`)).status,409);
+  assert.equal((await internal('payment','order',`/v1/payments/${appCancel.payment.id}`)).body.status,'cancelled');
+  assert.equal((await internal('inventory','order',`/v1/reservations/${appCancel.reservationId}`)).body.status,'released');
+  const appRefund=await appCheckout('refund');sql('inventory','UPDATE reservations SET expires_at=? WHERE id=?',[Date.now()-1000,appRefund.reservationId]);
+  const appRefunded=await appApi(`/api/payments/${appRefund.payment.id}/confirm`,'POST',{});assert.ok([202,409].includes(appRefunded.status));
+  await waitFor(async()=> (await appApi(`/api/orders/${appRefund.orderId}`)).body.status==='cancelled','App refund incomplete');
+  assert.equal((await internal('payment','order',`/v1/payments/${appRefund.payment.id}`)).body.status,'refunded');
+  assert.equal((await internal('inventory','order','/v1/stock/mug')).body.available,14);
+  console.log('PASS: actual App BFF credentials, JWT, channel contract, 202 settlement, cancellation and refund');
   console.log('Settlement SIT passed');
  } finally {
-  for (const service of services.toReversed()) await stop(service);
+  for (const service of [...processes.keys()].reverse()) await stop(service);
   for (const server of servers) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
  }
 }
