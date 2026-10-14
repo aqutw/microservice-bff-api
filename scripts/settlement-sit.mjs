@@ -43,7 +43,7 @@ async function run(workspace) {
  const ports = {}, urls = {}, processes = new Map(), servers = [];
  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
  const prefix = peer => peer.replaceAll('-', '_').toUpperCase();
- const faults = { commit: '', refund: '' };
+ const faults = { reserve: '', create_payment: '', commit: '', refund: '', cancel: '', release: '' };
 
  async function freePort() {
   const listener = net.createServer(); listener.listen(0, '127.0.0.1'); await once(listener, 'listening');
@@ -84,13 +84,14 @@ async function run(workspace) {
  }
  async function proxy(target) {
   const server = https.createServer(certificate(target), (req, res) => {
-   const fault = req.url.endsWith('/commit') ? 'commit' : req.url.endsWith('/refund') ? 'refund' : null;
-   // Keep refund lookup unavailable after its lost response until the restart test restores it.
-   if ((fault && faults[fault] === 'fail') || (target === 'payment' && faults.refund === 'fail' && req.method === 'GET')) {
+   const fault = req.method !== 'POST' ? null : req.url === '/v1/reservations' ? 'reserve' : req.url === '/v1/payments' ? 'create_payment' :
+    ['commit', 'refund', 'cancel', 'release'].find(action => req.url.endsWith(`/${action}`));
+   // Hold reconciliation until each lost-response assertion has observed the durable intermediate state.
+   if ((fault && faults[fault] === 'fail') || (target === 'payment' && ['refund', 'cancel', 'create_payment'].some(action => faults[action] === 'fail') && req.method === 'GET')) {
     res.writeHead(503, { 'content-type': 'application/json' }); res.end('{"error":"injected_outage"}'); return;
    }
    const upstream = https.request(urls[target] + req.url, { method: req.method, headers: req.headers, ca }, response => {
-    if (fault && faults[fault] === 'drop' && response.statusCode === 200) {
+    if (fault && faults[fault] === 'drop' && [200, 201].includes(response.statusCode)) {
      faults[fault] = 'fail'; response.resume(); response.on('end', () => res.destroy()); return;
     }
     res.writeHead(response.statusCode, response.headers); response.pipe(res);
@@ -193,6 +194,45 @@ async function run(workspace) {
   assert.equal(sql('order', "SELECT count(*) FROM audit_outbox WHERE aggregate_id=? AND event_type='order.settlement_recovering'", [legacy.order.id])[0][0], 1);
   assert.equal((await internal('inventory', 'order', '/v1/stock/mug')).body.available, 15);
   console.log('PASS: previous-version paid workflow is recovered on upgrade; stock matches five sales');
+
+  for (const [action, stage] of [['reserve', 'reserve'], ['create_payment', 'payment']]) {
+   const before = (await internal('inventory', 'order', '/v1/stock/mug')).body.available;
+   faults[action] = 'drop';
+   const response = await fetch(bff + '/api/checkout', { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': `lost-${action}` }, body: JSON.stringify({ items: [{ sku: 'mug', quantity: 1 }] }) });
+   assert.equal(response.status, 202);
+   const accepted = await response.json();
+   const orderID = sql('order', 'SELECT order_id FROM checkouts WHERE id=?', [accepted.checkoutId])[0][0];
+   await idleStage(accepted, stage);
+   assert.equal(sql('inventory', 'SELECT count(*) FROM reservations WHERE order_id=?', [orderID])[0][0], 1);
+   assert.equal(sql('payment', 'SELECT count(*) FROM payments WHERE order_id=?', [orderID])[0][0], action === 'reserve' ? 0 : 1);
+   assert.equal((await api(`/api/orders/${orderID}/cancel`, 'POST', {})).status, 202);
+   assert.deepEqual(sql('order', 'SELECT stage,cancel_requested FROM checkouts WHERE id=?', [accepted.checkoutId]), [[stage, 1]]);
+   faults[action] = '';
+   await waitFor(async () => (await api(`/api/orders/${orderID}`)).body.status === 'cancelled', `lost ${action} cancellation incomplete`);
+   assert.equal((await api(`/api/checkouts/${accepted.checkoutId}`)).status, 409);
+   assert.deepEqual(sql('inventory', 'SELECT status FROM reservations WHERE order_id=?', [orderID]), [['released']]);
+   assert.deepEqual(sql('payment', 'SELECT status FROM payments WHERE order_id=?', [orderID]), action === 'reserve' ? [] : [['cancelled']]);
+   assert.equal((await internal('inventory', 'order', '/v1/stock/mug')).body.available, before);
+   console.log(`PASS: lost ${action} response recovers one resource before cancellation and restores stock`);
+  }
+  for (const action of ['cancel', 'release']) {
+   const before = (await internal('inventory', 'order', '/v1/stock/mug')).body.available;
+   const lostCompensation = await checkout(`lost-${action}`);
+   faults[action] = 'drop';
+   assert.equal((await api(`/api/orders/${lostCompensation.order.id}/cancel`, 'POST', {})).status, 202);
+   await idleStage(lostCompensation, 'compensate');
+   const service = action === 'cancel' ? 'payment' : 'inventory';
+   const aggregate = action === 'cancel' ? lostCompensation.payment.id : lostCompensation.inventory.reservationId;
+   const event = action === 'cancel' ? 'payment.cancelled' : 'inventory.released';
+   assert.equal(sql(service, 'SELECT count(*) FROM audit_outbox WHERE aggregate_id=? AND event_type=?', [aggregate, event])[0][0], 1);
+   assert.equal((await api(`/api/orders/${lostCompensation.order.id}`)).body.status, 'cancelling');
+   faults[action] = '';
+   await cancelled(lostCompensation, 'cancelled');
+   assert.equal(sql(service, 'SELECT count(*) FROM audit_outbox WHERE aggregate_id=? AND event_type=?', [aggregate, event])[0][0], 1);
+   // before includes no hold; checkout reserved one unit and cancellation must restore exactly one.
+   assert.equal((await internal('inventory', 'order', '/v1/stock/mug')).body.available, before);
+   console.log(`PASS: lost ${action} response replays compensation without duplicate audit or stock changes`);
+  }
 
   // Exercise the actual App process and its separate service credentials. Domain faults remain shared above.
   const jose=await import(createRequire(new URL('../bff-api/package.json',import.meta.url)).resolve('jose'));
